@@ -206,13 +206,23 @@ export default function ProjectDetailView({ projectId }: ProjectDetailViewProps)
             className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-400/40 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-50"
             aria-label="New task title"
           />
-          <button
-            type="submit"
-            disabled={!newTaskTitle.trim()}
-            className="inline-flex items-center justify-center rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-white"
-          >
-            Add task
-          </button>
+          <span className="group relative inline-flex">
+            <button
+              type="submit"
+              disabled={!newTaskTitle.trim()}
+              className="inline-flex items-center justify-center rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-white"
+            >
+              Add task
+            </button>
+            {!newTaskTitle.trim() ? (
+              <span
+                role="tooltip"
+                className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5 w-max max-w-[16rem] -translate-x-1/2 rounded-md bg-zinc-900 px-2.5 py-1.5 text-center text-[11px] font-medium leading-snug text-white opacity-0 invisible shadow-lg transition-none duration-0 group-hover:visible group-hover:opacity-100 dark:bg-zinc-100 dark:text-zinc-950"
+              >
+                Please enter a task title first
+              </span>
+            ) : null}
+          </span>
         </form>
       </div>
 
