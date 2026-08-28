@@ -1,0 +1,145 @@
+// Simple Project Task Tracker 2.0 — Prisma schema
+// Canonical persistence layer aligned with doc/dev_plan.md Section 3.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum GlobalRole {
+  super_pm
+  pm
+  member
+  viewer
+}
+
+enum TaskStatus {
+  todo
+  in_progress
+  done
+}
+
+enum TaskPriority {
+  urgent
+  important
+  medium
+  low
+}
+
+enum TaskBucket {
+  initiating
+  planning
+  executing
+  monitoring
+  closing
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+/// Profile row keyed by Supabase Auth user id (`auth.users.id`).
+model User {
+  id         String     @id @db.Uuid
+  email      String     @unique
+  name       String
+  globalRole GlobalRole
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  ownedProjects  Project[]       @relation("ProjectOwner")
+  projectMembers ProjectMember[]
+  assignedTasks  Task[]          @relation("TaskAssignee")
+  comments       TaskComment[]
+}
+
+model Project {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  description String   @default("")
+  ownerId     String   @db.Uuid
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  owner   User            @relation("ProjectOwner", fields: [ownerId], references: [id])
+  members ProjectMember[]
+  tasks   Task[]
+
+  @@index([ownerId])
+}
+
+/// Join table for project membership (`permittedUserIds` in the application layer).
+model ProjectMember {
+  id        String   @id @default(uuid()) @db.Uuid
+  projectId String   @db.Uuid
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([userId])
+}
+
+model Task {
+  id                   String       @id @default(uuid()) @db.Uuid
+  projectId            String       @db.Uuid
+  title                String
+  description          String       @default("")
+  status               TaskStatus   @default(todo)
+  priority             TaskPriority @default(medium)
+  bucket               TaskBucket   @default(executing)
+  assigneeId           String?      @db.Uuid
+  plannedStartDate     DateTime?    @db.Date
+  plannedDueDate       DateTime?    @db.Date
+  updatedStartDate     DateTime?    @db.Date
+  updatedDueDate       DateTime?    @db.Date
+  actualStartDate      DateTime?    @db.Date
+  actualCompletionDate DateTime?    @db.Date
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+
+  project  Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignee User?         @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  subtasks Subtask[]
+  comments TaskComment[]
+
+  @@index([projectId])
+  @@index([assigneeId])
+}
+
+model Subtask {
+  id          String   @id @default(uuid()) @db.Uuid
+  taskId      String   @db.Uuid
+  title       String
+  isCompleted Boolean  @default(false)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+}
+
+model TaskComment {
+  id        String   @id @default(uuid()) @db.Uuid
+  taskId    String   @db.Uuid
+  userId    String   @db.Uuid
+  content   String
+  createdAt DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@index([userId])
+}
