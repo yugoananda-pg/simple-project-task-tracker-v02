@@ -24,7 +24,7 @@ export type TaskDetailDrawerProps = {
   open: boolean;
   onClose: () => void;
   /** Live field updates for Planner-style task details. */
-  onTaskChange: (taskId: string, patch: Partial<Task>) => void;
+  onTaskChange?: (taskId: string, patch: Partial<Task>) => void;
   onToggleSubtask?: (
     taskId: string,
     subtaskId: string,
@@ -35,9 +35,10 @@ export type TaskDetailDrawerProps = {
   onPostComment?: (taskId: string, content: string) => void;
   /** Optional display names for comment authors / PIC. */
   userNamesById?: Record<string, string>;
+  readOnly?: boolean;
 };
 
-const BUCKET_OPTIONS: ReadonlyArray<{ value: TaskBucket; label: string }> = [
+const PROCESS_GROUP_OPTIONS: ReadonlyArray<{ value: TaskBucket; label: string }> = [
   { value: "initiating", label: "Initiating" },
   { value: "planning", label: "Planning" },
   { value: "executing", label: "Executing" },
@@ -169,11 +170,13 @@ function AuDateField({
   label,
   value,
   onCommit,
+  disabled = false,
 }: {
   id: string;
   label: string;
   value: string | null;
   onCommit: (next: string | null) => void;
+  disabled?: boolean;
 }) {
   const externalValue = toDateInputValue(value);
   const [caption, setCaption] = useState(externalValue);
@@ -197,6 +200,7 @@ function AuDateField({
         type="date"
         lang="en-AU"
         defaultValue={externalValue}
+        disabled={disabled}
         onBlur={(event) => {
           const raw = event.target.value;
           if (raw === "") {
@@ -231,23 +235,30 @@ export default function TaskDetailDrawer({
   onAddSubtask,
   onPostComment,
   userNamesById = {},
+  readOnly = false,
 }: TaskDetailDrawerProps) {
   const titleId = useId();
   const panelRef = useRef<HTMLElement>(null);
   const [checklistDraft, setChecklistDraft] = useState("");
   const [commentDraft, setCommentDraft] = useState("");
   const [draftTaskId, setDraftTaskId] = useState<string | null>(null);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [descriptionDraft, setDescriptionDraft] = useState("");
 
   const activeTask = task;
   const isVisible = open && activeTask !== null;
 
   if (activeTask && activeTask.id !== draftTaskId) {
     setDraftTaskId(activeTask.id);
+    setTitleDraft(activeTask.title);
+    setDescriptionDraft(activeTask.description);
     setChecklistDraft("");
     setCommentDraft("");
   }
   if (!activeTask && draftTaskId !== null) {
     setDraftTaskId(null);
+    setTitleDraft("");
+    setDescriptionDraft("");
     setChecklistDraft("");
     setCommentDraft("");
   }
@@ -292,9 +303,10 @@ export default function TaskDetailDrawer({
   const totalCount = subtasks.length;
   const progressPercent =
     totalCount === 0 ? 0 : Math.round((completedCount / totalCount) * 100);
+  const canEdit = !readOnly && Boolean(onTaskChange);
 
   function patchTask(patch: Partial<Task>) {
-    if (!activeTask) return;
+    if (!activeTask || !canEdit || !onTaskChange) return;
     onTaskChange(activeTask.id, patch);
   }
 
@@ -396,10 +408,15 @@ export default function TaskDetailDrawer({
                   <input
                     id={`title-${activeTask.id}`}
                     type="text"
-                    value={activeTask.title}
-                    onChange={(event) =>
-                      patchTask({ title: event.target.value })
-                    }
+                    value={titleDraft}
+                    disabled={!canEdit}
+                    onChange={(event) => setTitleDraft(event.target.value)}
+                    onBlur={() => {
+                      const trimmed = titleDraft.trim();
+                      if (trimmed && trimmed !== activeTask.title) {
+                        patchTask({ title: trimmed });
+                      }
+                    }}
                     className={fieldClassName}
                     placeholder="Task title"
                   />
@@ -414,10 +431,14 @@ export default function TaskDetailDrawer({
                   </label>
                   <textarea
                     id={`description-${activeTask.id}`}
-                    value={activeTask.description}
-                    onChange={(event) =>
-                      patchTask({ description: event.target.value })
-                    }
+                    value={descriptionDraft}
+                    disabled={!canEdit}
+                    onChange={(event) => setDescriptionDraft(event.target.value)}
+                    onBlur={() => {
+                      if (descriptionDraft !== activeTask.description) {
+                        patchTask({ description: descriptionDraft });
+                      }
+                    }}
                     rows={4}
                     className={`${fieldClassName} min-h-24 resize-y`}
                     placeholder="Add a description…"
@@ -431,20 +452,21 @@ export default function TaskDetailDrawer({
               >
                 <div className="w-full min-w-0 max-w-full">
                   <label
-                    htmlFor={`bucket-${activeTask.id}`}
+                    htmlFor={`process-group-${activeTask.id}`}
                     className={labelClassName}
                   >
-                    Bucket
+                    Process group
                   </label>
                   <select
-                    id={`bucket-${activeTask.id}`}
+                    id={`process-group-${activeTask.id}`}
                     value={activeTask.bucket}
+                    disabled={!canEdit}
                     onChange={(event) =>
                       patchTask({ bucket: event.target.value as TaskBucket })
                     }
                     className={fieldClassName}
                   >
-                    {BUCKET_OPTIONS.map((option) => (
+                    {PROCESS_GROUP_OPTIONS.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
                       </option>
@@ -462,6 +484,7 @@ export default function TaskDetailDrawer({
                   <select
                     id={`priority-${activeTask.id}`}
                     value={activeTask.priority}
+                    disabled={!canEdit}
                     onChange={(event) =>
                       patchTask({
                         priority: event.target.value as TaskPriority,
@@ -487,6 +510,7 @@ export default function TaskDetailDrawer({
                   <select
                     id={`status-${activeTask.id}`}
                     value={activeTask.status}
+                    disabled={!canEdit}
                     onChange={(event) =>
                       patchTask({ status: event.target.value as TaskStatus })
                     }
@@ -511,6 +535,7 @@ export default function TaskDetailDrawer({
                     id={`assignee-${activeTask.id}`}
                     type="text"
                     defaultValue={activeTask.assigneeId ?? ""}
+                    disabled={!canEdit}
                     onBlur={(event) => {
                       const trimmed = event.target.value.trim();
                       patchTask({
@@ -542,6 +567,7 @@ export default function TaskDetailDrawer({
                       id={`${field.key}-${activeTask.id}`}
                       label={field.label}
                       value={activeTask[field.key]}
+                      disabled={!canEdit}
                       onCommit={(next) =>
                         patchTask({ [field.key]: next })
                       }
@@ -592,6 +618,7 @@ export default function TaskDetailDrawer({
                           id={`subtask-${item.id}`}
                           type="checkbox"
                           checked={item.isCompleted}
+                          disabled={!canEdit || !onToggleSubtask}
                           onChange={(event) =>
                             onToggleSubtask?.(
                               activeTask.id,

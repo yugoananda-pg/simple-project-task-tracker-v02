@@ -5,7 +5,7 @@ import type { Task, TaskPriority, TaskStatus } from "@/src/lib/types";
 export type TaskListViewProps = {
   tasks: Task[];
   onTaskClick: (task: Task) => void;
-  onStatusChange: (taskId: string, newStatus: TaskStatus) => void;
+  onStatusChange?: (taskId: string, newStatus: TaskStatus) => void;
 };
 
 const STATUS_LABELS: Record<TaskStatus, string> = {
@@ -101,8 +101,9 @@ export default function TaskListView({
               <select
                 id={`status-${task.id}`}
                 value={task.status}
+                disabled={!onStatusChange}
                 onChange={(event) =>
-                  onStatusChange(task.id, event.target.value as TaskStatus)
+                  onStatusChange?.(task.id, event.target.value as TaskStatus)
                 }
                 className={[
                   "w-full rounded-lg border px-3 py-2 text-xs font-semibold sm:w-auto",

@@ -10,8 +10,12 @@ import KanbanColumn from "./KanbanColumn";
 
 export type KanbanBoardProps = {
   tasks: Task[];
-  onStatusChange: (taskId: string, newStatus: TaskStatus) => void;
+  onStatusChange?: (
+    taskId: string,
+    newStatus: TaskStatus,
+  ) => Promise<boolean> | boolean | void;
   onTaskClick?: (task: Task) => void;
+  readOnly?: boolean;
 };
 
 const COLUMNS: ReadonlyArray<{ id: TaskStatus; title: string }> = [
@@ -38,6 +42,7 @@ export default function KanbanBoard({
   tasks,
   onStatusChange,
   onTaskClick,
+  readOnly = false,
 }: KanbanBoardProps) {
   const isReady = useSyncExternalStore(
     subscribeNever,
@@ -59,7 +64,9 @@ export default function KanbanBoard({
     return grouped;
   }, [tasks]);
 
-  function handleDragEnd(result: DropResult) {
+  async function handleDragEnd(result: DropResult) {
+    if (!onStatusChange || readOnly) return;
+
     const { destination, source, draggableId } = result;
 
     if (!destination) return;
@@ -70,7 +77,7 @@ export default function KanbanBoard({
 
     if (newStatus === previousStatus) return;
 
-    onStatusChange(draggableId, newStatus);
+    await onStatusChange(draggableId, newStatus);
   }
 
   if (!isReady) {
@@ -104,6 +111,7 @@ export default function KanbanBoard({
             title={column.title}
             tasks={tasksByStatus[column.id]}
             onTaskClick={onTaskClick}
+            readOnly={readOnly || !onStatusChange}
           />
         ))}
       </div>

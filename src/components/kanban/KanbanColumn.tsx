@@ -9,6 +9,7 @@ export type KanbanColumnProps = {
   title: string;
   tasks: Task[];
   onTaskClick?: (task: Task) => void;
+  readOnly?: boolean;
 };
 
 export default function KanbanColumn({
@@ -16,6 +17,7 @@ export default function KanbanColumn({
   title,
   tasks,
   onTaskClick,
+  readOnly = false,
 }: KanbanColumnProps) {
   return (
     <section className="flex min-h-[28rem] w-full min-w-[16.5rem] flex-1 flex-col rounded-xl border border-zinc-200 bg-zinc-50/80">
@@ -64,6 +66,7 @@ export default function KanbanColumn({
                   task={task}
                   index={index}
                   onClick={onTaskClick}
+                  isDragDisabled={readOnly}
                 />
               ))
             )}

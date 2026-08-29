@@ -7,6 +7,7 @@ export type TaskCardProps = {
   task: Task;
   index: number;
   onClick?: (task: Task) => void;
+  isDragDisabled?: boolean;
 };
 
 const PRIORITY_LABELS: Record<TaskPriority, string> = {
@@ -23,7 +24,7 @@ const PRIORITY_STYLES: Record<TaskPriority, string> = {
   low: "bg-zinc-100 text-zinc-700 ring-zinc-500/20",
 };
 
-const BUCKET_LABELS: Record<TaskBucket, string> = {
+const PROCESS_GROUP_LABELS: Record<TaskBucket, string> = {
   initiating: "Initiating",
   planning: "Planning",
   executing: "Executing",
@@ -68,16 +69,25 @@ function assigneeLabel(task: Task): string {
   return `PIC · ${task.assigneeId.slice(0, 8)}`;
 }
 
-export default function TaskCard({ task, index, onClick }: TaskCardProps) {
+export default function TaskCard({
+  task,
+  index,
+  onClick,
+  isDragDisabled = false,
+}: TaskCardProps) {
   const overdue = isOverdue(task);
 
   return (
-    <Draggable draggableId={task.id} index={index}>
+    <Draggable
+      draggableId={task.id}
+      index={index}
+      isDragDisabled={isDragDisabled}
+    >
       {(provided, snapshot) => (
         <article
           ref={provided.innerRef}
           {...provided.draggableProps}
-          {...provided.dragHandleProps}
+          {...(isDragDisabled ? {} : provided.dragHandleProps)}
           role="button"
           tabIndex={0}
           onClick={() => onClick?.(task)}
@@ -119,8 +129,11 @@ export default function TaskCard({ task, index, onClick }: TaskCardProps) {
             >
               {PRIORITY_LABELS[task.priority]}
             </span>
-            <span className="inline-flex items-center rounded-md bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-800 ring-1 ring-inset ring-violet-600/15">
-              {BUCKET_LABELS[task.bucket]}
+            <span
+              className="inline-flex items-center rounded-md bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-800 ring-1 ring-inset ring-violet-600/15"
+              title={`Process group: ${PROCESS_GROUP_LABELS[task.bucket]}`}
+            >
+              {PROCESS_GROUP_LABELS[task.bucket]}
             </span>
           </div>
 

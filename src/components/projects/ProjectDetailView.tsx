@@ -1,25 +1,32 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState, useSyncExternalStore, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
+import { FormEvent, useState, useTransition } from "react";
+
 import KanbanBoard from "@/src/components/kanban/KanbanBoard";
 import TaskDetailDrawer from "@/src/components/kanban/TaskDetailDrawer";
 import TaskListView from "@/src/components/tasks/TaskListView";
+import type { ActionResult } from "@/src/lib/actions/errors";
 import {
   addComment,
   addSubtask,
   createTask,
-  getServerStoreSnapshot,
-  getStoreSnapshot,
-  subscribeStore,
   toggleSubtask,
   updateTaskFields,
   updateTaskStatus,
-} from "@/src/lib/store";
-import type { Task, TaskStatus } from "@/src/lib/types";
+} from "@/src/lib/actions/tasks";
+import type { ProjectAccessLevel } from "@/src/lib/rbac";
+import type { Project, Task, TaskStatus } from "@/src/lib/types";
 
 export type ProjectDetailViewProps = {
   projectId: string;
+  initialProject: Project | null;
+  initialTasks: Task[];
+  access: ProjectAccessLevel;
+  canWriteTasks: boolean;
+  userNamesById: Record<string, string>;
+  loadError?: string | null;
 };
 
 type ViewMode = "list" | "kanban";
@@ -29,57 +36,92 @@ const VIEW_OPTIONS: ReadonlyArray<{ id: ViewMode; label: string }> = [
   { id: "kanban", label: "Kanban View" },
 ];
 
-const USER_NAMES: Record<string, string> = {
-  "wave1-local-owner": "Local Owner",
-};
-
-export default function ProjectDetailView({ projectId }: ProjectDetailViewProps) {
-  const store = useSyncExternalStore(
-    subscribeStore,
-    getStoreSnapshot,
-    getServerStoreSnapshot,
-  );
+export default function ProjectDetailView({
+  projectId,
+  initialProject,
+  initialTasks,
+  access,
+  canWriteTasks,
+  userNamesById,
+  loadError = null,
+}: ProjectDetailViewProps) {
+  const router = useRouter();
+  const [tasks, setTasks] = useState(initialTasks);
+  const [syncedInitialTasks, setSyncedInitialTasks] = useState(initialTasks);
   const [viewMode, setViewMode] = useState<ViewMode>("kanban");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [newTaskTitle, setNewTaskTitle] = useState("");
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(loadError);
+  const [isPending, startTransition] = useTransition();
 
-  const project = useMemo(
-    () => store.projects.find((item) => item.id === projectId) ?? null,
-    [store, projectId],
-  );
+  if (initialTasks !== syncedInitialTasks) {
+    setSyncedInitialTasks(initialTasks);
+    setTasks(initialTasks);
+  }
 
-  const tasks = useMemo(
-    () => store.tasks.filter((task) => task.projectId === projectId),
-    [store, projectId],
-  );
+  const project = initialProject;
+  const selectedTask =
+    selectedTaskId != null
+      ? (tasks.find((task) => task.id === selectedTaskId) ?? null)
+      : null;
+  const isReadOnly = access === "read";
 
-  const selectedTask = useMemo(() => {
-    if (!selectedTaskId) return null;
-    return tasks.find((task) => task.id === selectedTaskId) ?? null;
-  }, [tasks, selectedTaskId]);
+  function syncTask(updated: Task) {
+    setTasks((current) => {
+      const index = current.findIndex((task) => task.id === updated.id);
+      if (index < 0) {
+        return [updated, ...current];
+      }
+      const next = [...current];
+      next[index] = updated;
+      return next;
+    });
+  }
 
-  function handleStatusChange(taskId: string, newStatus: TaskStatus) {
-    try {
-      updateTaskStatus(taskId, newStatus);
+  function runTaskMutation(
+    action: () => Promise<ActionResult<Task>>,
+  ) {
+    startTransition(async () => {
+      const result = await action();
+      if (!result.success) {
+        setActionError(result.error ?? "Something went wrong. Please try again.");
+        return;
+      }
+      syncTask(result.data);
       setActionError(null);
-    } catch (error: unknown) {
-      setActionError(
-        error instanceof Error ? error.message : "Unable to update task status.",
-      );
-    }
+      router.refresh();
+    });
+  }
+
+  function handleStatusChange(taskId: string, newStatus: TaskStatus): Promise<boolean> {
+    if (!canWriteTasks) return Promise.resolve(false);
+
+    const snapshot = tasks;
+    setTasks((current) =>
+      current.map((task) =>
+        task.id === taskId ? { ...task, status: newStatus } : task,
+      ),
+    );
+    setActionError(null);
+
+    return updateTaskStatus(taskId, newStatus).then((result) => {
+      if (!result.success) {
+        setTasks(snapshot);
+        setActionError(
+          result.error ?? "Something went wrong. Please try again.",
+        );
+        return false;
+      }
+      syncTask(result.data);
+      router.refresh();
+      return true;
+    });
   }
 
   function handleTaskChange(taskId: string, patch: Partial<Task>) {
-    try {
-      updateTaskFields(taskId, patch);
-      setActionError(null);
-    } catch (error: unknown) {
-      setActionError(
-        error instanceof Error ? error.message : "Unable to update task.",
-      );
-    }
+    if (!canWriteTasks) return;
+    runTaskMutation(() => updateTaskFields(taskId, patch));
   }
 
   function handleToggleSubtask(
@@ -87,40 +129,18 @@ export default function ProjectDetailView({ projectId }: ProjectDetailViewProps)
     subtaskId: string,
     isCompleted: boolean,
   ) {
-    try {
-      toggleSubtask(taskId, subtaskId, isCompleted);
-      setActionError(null);
-    } catch (error: unknown) {
-      setActionError(
-        error instanceof Error
-          ? error.message
-          : "Unable to update checklist item.",
-      );
-    }
+    if (!canWriteTasks) return;
+    runTaskMutation(() => toggleSubtask(taskId, subtaskId, isCompleted));
   }
 
   function handleAddSubtask(taskId: string, title: string) {
-    try {
-      addSubtask(taskId, title);
-      setActionError(null);
-    } catch (error: unknown) {
-      setActionError(
-        error instanceof Error
-          ? error.message
-          : "Unable to add checklist item.",
-      );
-    }
+    if (!canWriteTasks) return;
+    runTaskMutation(() => addSubtask(taskId, title));
   }
 
   function handlePostComment(taskId: string, content: string) {
-    try {
-      addComment(taskId, content);
-      setActionError(null);
-    } catch (error: unknown) {
-      setActionError(
-        error instanceof Error ? error.message : "Unable to post comment.",
-      );
-    }
+    if (!canWriteTasks) return;
+    runTaskMutation(() => addComment(taskId, content));
   }
 
   function openTask(task: Task) {
@@ -135,19 +155,24 @@ export default function ProjectDetailView({ projectId }: ProjectDetailViewProps)
     }, 300);
   }
 
-  function handleAddTask(event: FormEvent) {
+  function handleAddTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!canWriteTasks) return;
+
     const title = newTaskTitle.trim();
     if (!title) return;
-    try {
-      createTask({ projectId, title });
+
+    startTransition(async () => {
+      const result = await createTask({ projectId, title });
+      if (!result.success) {
+        setActionError(result.error ?? "Unable to create task.");
+        return;
+      }
+      syncTask(result.data);
       setNewTaskTitle("");
       setActionError(null);
-    } catch (error: unknown) {
-      setActionError(
-        error instanceof Error ? error.message : "Unable to create task.",
-      );
-    }
+      router.refresh();
+    });
   }
 
   if (!project) {
@@ -164,7 +189,7 @@ export default function ProjectDetailView({ projectId }: ProjectDetailViewProps)
             Project not found
           </h1>
           <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
-            This project does not exist or may have been deleted.
+            This project does not exist or you do not have access to it.
           </p>
         </div>
       </section>
@@ -182,9 +207,16 @@ export default function ProjectDetailView({ projectId }: ProjectDetailViewProps)
 
       <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <h1 className="break-words text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-            {project.name}
-          </h1>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="break-words text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
+              {project.name}
+            </h1>
+            {isReadOnly ? (
+              <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                Read-only
+              </span>
+            ) : null}
+          </div>
           {project.description ? (
             <p className="mt-2 max-w-2xl break-words text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
               {project.description}
@@ -194,36 +226,39 @@ export default function ProjectDetailView({ projectId }: ProjectDetailViewProps)
           )}
         </div>
 
-        <form
-          onSubmit={handleAddTask}
-          className="flex w-full flex-col gap-2 sm:w-auto sm:min-w-[20rem] sm:flex-row"
-        >
-          <input
-            type="text"
-            value={newTaskTitle}
-            onChange={(event) => setNewTaskTitle(event.target.value)}
-            placeholder="New task title"
-            className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-400/40 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-50"
-            aria-label="New task title"
-          />
-          <span className="group relative inline-flex">
-            <button
-              type="submit"
-              disabled={!newTaskTitle.trim()}
-              className="inline-flex items-center justify-center rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-white"
-            >
-              Add task
-            </button>
-            {!newTaskTitle.trim() ? (
-              <span
-                role="tooltip"
-                className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5 w-max max-w-[16rem] -translate-x-1/2 rounded-md bg-zinc-900 px-2.5 py-1.5 text-center text-[11px] font-medium leading-snug text-white opacity-0 invisible shadow-lg transition-none duration-0 group-hover:visible group-hover:opacity-100 dark:bg-zinc-100 dark:text-zinc-950"
+        {canWriteTasks ? (
+          <form
+            onSubmit={handleAddTask}
+            className="flex w-full flex-col gap-2 sm:w-auto sm:min-w-[20rem] sm:flex-row"
+          >
+            <input
+              type="text"
+              value={newTaskTitle}
+              onChange={(event) => setNewTaskTitle(event.target.value)}
+              placeholder="New task title"
+              disabled={isPending}
+              className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-400/40 disabled:opacity-60 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-50"
+              aria-label="New task title"
+            />
+            <span className="group relative inline-flex">
+              <button
+                type="submit"
+                disabled={!newTaskTitle.trim() || isPending}
+                className="inline-flex items-center justify-center rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-white"
               >
-                Please enter a task title first
-              </span>
-            ) : null}
-          </span>
-        </form>
+                Add task
+              </button>
+              {!newTaskTitle.trim() ? (
+                <span
+                  role="tooltip"
+                  className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5 w-max max-w-[16rem] -translate-x-1/2 rounded-md bg-zinc-900 px-2.5 py-1.5 text-center text-[11px] font-medium leading-snug text-white opacity-0 invisible shadow-lg transition-none duration-0 group-hover:visible group-hover:opacity-100 dark:bg-zinc-100 dark:text-zinc-950"
+                >
+                  Please enter a task title first
+                </span>
+              ) : null}
+            </span>
+          </form>
+        ) : null}
       </div>
 
       <div className="mt-8 space-y-4">
@@ -276,14 +311,15 @@ export default function ProjectDetailView({ projectId }: ProjectDetailViewProps)
             {viewMode === "kanban" ? (
               <KanbanBoard
                 tasks={tasks}
-                onStatusChange={handleStatusChange}
+                onStatusChange={canWriteTasks ? handleStatusChange : undefined}
                 onTaskClick={openTask}
+                readOnly={!canWriteTasks}
               />
             ) : (
               <TaskListView
                 tasks={tasks}
                 onTaskClick={openTask}
-                onStatusChange={handleStatusChange}
+                onStatusChange={canWriteTasks ? handleStatusChange : undefined}
               />
             )}
           </div>
@@ -294,11 +330,12 @@ export default function ProjectDetailView({ projectId }: ProjectDetailViewProps)
         open={drawerOpen}
         task={selectedTask}
         onClose={closeDrawer}
-        onTaskChange={handleTaskChange}
-        onToggleSubtask={handleToggleSubtask}
-        onAddSubtask={handleAddSubtask}
-        onPostComment={handlePostComment}
-        userNamesById={USER_NAMES}
+        onTaskChange={canWriteTasks ? handleTaskChange : undefined}
+        onToggleSubtask={canWriteTasks ? handleToggleSubtask : undefined}
+        onAddSubtask={canWriteTasks ? handleAddSubtask : undefined}
+        onPostComment={canWriteTasks ? handlePostComment : undefined}
+        userNamesById={userNamesById}
+        readOnly={!canWriteTasks}
       />
     </section>
   );
