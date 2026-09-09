@@ -1,6 +1,7 @@
 import ProjectDetailView from "@/src/components/projects/ProjectDetailView";
 import { getProjectById } from "@/src/lib/actions/projects";
-import { getCommentAuthorNames, listTasksByProject } from "@/src/lib/actions/tasks";
+import { listTasksByProject } from "@/src/lib/actions/tasks";
+import { getSessionUser } from "@/src/lib/rbac";
 
 type ProjectDetailPageProps = {
   params: Promise<{ id: string }>;
@@ -10,10 +11,10 @@ export default async function ProjectDetailPage({
   params,
 }: ProjectDetailPageProps) {
   const { id } = await params;
-  const [projectResult, tasksResult, userNamesById] = await Promise.all([
+  const [projectResult, tasksResult, sessionUser] = await Promise.all([
     getProjectById(id),
     listTasksByProject(id),
-    getCommentAuthorNames(id).catch(() => ({})),
+    getSessionUser(),
   ]);
 
   const loadError =
@@ -32,7 +33,13 @@ export default async function ProjectDetailPage({
       canWriteTasks={
         projectResult.success ? projectResult.data.canWriteTasks : false
       }
-      userNamesById={userNamesById}
+      canManageProject={
+        projectResult.success ? projectResult.data.canManage : false
+      }
+      currentUserId={sessionUser?.id ?? null}
+      memberUsers={
+        projectResult.success ? projectResult.data.memberUsers : []
+      }
       loadError={loadError}
     />
   );

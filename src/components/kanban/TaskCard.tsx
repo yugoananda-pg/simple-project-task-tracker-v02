@@ -1,6 +1,13 @@
 "use client";
 
 import { Draggable } from "@hello-pangea/dnd";
+import PicLabel from "@/src/components/tasks/PicLabel";
+import {
+  getTaskPicInitial,
+  hasAssignedPic,
+  isCustomPic,
+} from "@/src/lib/assignee-display";
+import { getEffectiveDueDate } from "@/src/lib/task-defaults";
 import type { Task, TaskBucket, TaskPriority } from "@/src/lib/types";
 
 export type TaskCardProps = {
@@ -57,16 +64,16 @@ function parseDateOnly(value: string): Date | null {
 }
 
 function isOverdue(task: Task): boolean {
-  if (task.status === "done" || !task.plannedDueDate) return false;
-  const due = parseDateOnly(task.plannedDueDate);
+  if (task.status === "done") return false;
+  const dueValue = getEffectiveDueDate(task);
+  if (!dueValue) return false;
+  const due = parseDateOnly(dueValue);
   if (!due) return false;
   return due < startOfTodayLocal();
 }
 
-function assigneeLabel(task: Task): string {
-  if (!task.assigneeId) return "Unassigned";
-  // Wave 1: no user directory yet — show a compact PIC placeholder.
-  return `PIC · ${task.assigneeId.slice(0, 8)}`;
+function hasPic(task: Task): boolean {
+  return hasAssignedPic(task);
 }
 
 export default function TaskCard({
@@ -138,8 +145,21 @@ export default function TaskCard({
           </div>
 
           <div className="mt-3 flex items-center justify-between gap-2 border-t border-zinc-100 pt-2 text-xs text-zinc-500">
-            <span className="min-w-0 truncate" title={assigneeLabel(task)}>
-              {assigneeLabel(task)}
+            <span className="inline-flex min-w-0 items-center gap-1.5">
+              {hasPic(task) ? (
+                <span
+                  className={[
+                    "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold",
+                    isCustomPic(task)
+                      ? "bg-zinc-200 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300"
+                      : "bg-violet-100 text-violet-700 dark:bg-violet-900/50 dark:text-violet-200",
+                  ].join(" ")}
+                  title={isCustomPic(task) ? "Unregistered PIC" : undefined}
+                >
+                  {getTaskPicInitial(task)}
+                </span>
+              ) : null}
+              <PicLabel task={task} className="min-w-0 text-xs text-zinc-500" />
             </span>
             <span
               className={[
@@ -149,8 +169,8 @@ export default function TaskCard({
                 .filter(Boolean)
                 .join(" ")}
             >
-              {task.plannedDueDate
-                ? formatAuDate(task.plannedDueDate)
+              {getEffectiveDueDate(task)
+                ? formatAuDate(getEffectiveDueDate(task)!)
                 : "No due date"}
             </span>
           </div>

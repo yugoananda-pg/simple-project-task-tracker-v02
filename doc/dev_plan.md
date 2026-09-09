@@ -1,7 +1,7 @@
 # Simple Project Task Tracker 2.0 — Development Plan
 
 **Version:** 2.0  
-**Status:** North Star blueprint (pre-implementation)  
+**Status:** North Star blueprint — aligned with implemented codebase (Waves 1–2 complete; Wave 3 in progress)  
 **Predecessor:** [Simple Project Task Tracker](../Simple%20Project%20Task%20Tracker) (v1.0 MVP — LocalStorage, single-user)  
 **Stack (target):** Next.js (App Router), TypeScript, Tailwind CSS, PostgreSQL, Prisma, Supabase Auth  
 **Audience:** Human engineers and AI collaborators delivering Version 2.0  
@@ -23,8 +23,8 @@ Each item below is a discrete, buildable unit with a unique ID. Treat each as a 
 
 | Aspect | Detail |
 |--------|--------|
-| **Columns** | `To Do` · `Doing` / `In Progress` · `Completed` / `Done` |
-| **Behaviour** | Drag tasks between columns; drop updates `Task.status` immediately (optimistic UI with rollback on failure) |
+| **Columns** | `To Do` · `Doing` · `Done` |
+| **Behaviour** | Drag tasks between columns; drop updates `Task.status` immediately (optimistic UI with rollback on failure). Vertical reorder within a column updates `sortOrder`. Status/progress changes from the task drawer or list (not DnD) pin the card to the **top** of the destination column (`sortOrder` below the column minimum). Field edits stay optimistic in local state — no `router.refresh()` / board overlay — so the Kanban UI does not flicker while Server Actions persist. Each column header includes **+ Add Task** (creates a task at the top of that column with default progress); there is no redundant header-level Add Task control. |
 | **Card content** | Title, priority indicator, assignee/PIC, planned due date, overdue styling |
 | **Carry-over from v1** | Status values remain aligned with `todo` → `in_progress` → `done`; list/filter views may coexist as alternate presentations of the same data |
 
@@ -34,9 +34,11 @@ Each item below is a discrete, buildable unit with a unique ID. Treat each as a 
 |--------|--------|
 | **Buckets / Groups** | Project-phase buckets: Initiating · Planning · Executing · Monitoring · Closing |
 | **Priority** | Explicit levels (e.g. Urgent · Important · Medium · Low) |
-| **Multi-date tracking** | Planned start/due, updated start/due, and actual start/completion dates |
+| **Multi-date tracking** | Initial start/due, updated start/due, and actual start/completion dates |
+| **Progress** | Task-level `progress` (0–100%). Defaults on create: To Do → 0%, Doing → 1%, Done → 100%. Bidirectional sync with status: 0% ↔ To Do, 1–99% ↔ Doing, 100% ↔ Done. Doing keeps an existing 1–99% value when moved from another column; 0%/100% collapse to 1%. Editable in the task drawer (slider + buffered number input). |
 | **Sub-task checklists** | Nested checklist items with completion toggles (`Subtask`) |
 | **Task comments / chat** | Threaded comments on a task (`TaskComment`) for asynchronous collaboration |
+| **PIC / Assignee** | Flexible assignment in the task detail drawer: select a **registered project member** from the project roster (`assigneeId`, with `assigneeName` set to their display name) or choose **Custom PIC name…** for free-text entry (`assigneeName` only — e.g. external vendors or unregistered personnel such as "Mr X"; `assigneeId` is `null`). Server validates that registered assignees are project members. UI shows the PIC name on Kanban cards, Gantt rows, and analytics workload charts; custom PICs display a subtle **Custom** badge (tooltip: "Unregistered PIC"). |
 | **UI pattern** | Side panel or detail drawer opened from Kanban card, Gantt bar, or task list row |
 
 ### F-203: Multi-User Authentication & Granular RBAC
@@ -52,9 +54,11 @@ Each item below is a discrete, buildable unit with a unique ID. Treat each as a 
 
 | Aspect | Detail |
 |--------|--------|
-| **Timeline** | Bars mapped by planned/updated/actual duration and dates |
-| **Grouping** | Rows by task, optionally grouped by Assignee/PIC or bucket |
-| **Interaction** | View and (where permitted) adjust date ranges; hover/click opens task details |
+| **Timeline** | Three stacked bars per task: Initial (zinc), Updated (sky), Actual (emerald). Done Actual bars end with a checkmark node on the **right end** of the bar (node and line end share the same X). A red “today” vertical line (no top node) sticks under the date header while rows scroll. Month/week columns use day-proportional widths; bar and Today positions share the same column pixel math. |
+| **Layout** | Matching `h-12` / `h-16` panes, 2D freeze-panes, crisper grid (`border-zinc-700/60` columns, `border-zinc-800` rows). Process group headers use high-contrast zinc bands. |
+| **Grouping** | **Task list** (default) groups rows by process group (Initiating → Closing). **Assignee / PIC** groups by registered or custom PIC. |
+| **Scale** | Toolbar toggle between **Week** and **Month** column intervals (defaults from span length; user override sticks). |
+| **Interaction** | View and (where permitted) adjust date ranges; hover tooltips are instant (0ms); click opens task details |
 | **Integrity** | Invalid or inverted date ranges must not crash the chart (see Section 6) |
 
 ### F-205: Project Progress Dashboard & Analytics
@@ -63,7 +67,7 @@ Each item below is a discrete, buildable unit with a unique ID. Treat each as a 
 |--------|--------|
 | **Status distribution** | Widgets/charts for To Do / Doing / Done counts and proportions |
 | **Overdue tracking** | Tasks past planned/updated due date and not completed |
-| **Workload per PIC** | Task load and completion metrics by assignee |
+| **Workload per PIC** | Task load and completion metrics grouped by PIC — registered users (`assigneeId`) and custom free-text names (`assigneeName` when `assigneeId` is `null`) |
 | **Scope** | Per-project dashboard; Super PM may later aggregate across projects |
 
 ### F-206: Local Domain Configuration (`tracker.local`)
@@ -164,13 +168,16 @@ interface Project {
 | `status` | `TaskStatus` | yes | Default `todo`; drives Kanban column |
 | `priority` | `TaskPriority` | yes | Default `medium` |
 | `bucket` | `TaskBucket` | yes | Planner-style group; default `executing` or project-configurable |
-| `assigneeId` | `string` (UUID) \| `null` | no | FK → `User.id` (PIC) |
-| `plannedStartDate` | `Date` \| `null` | no | |
-| `plannedDueDate` | `Date` \| `null` | no | Replaces/extends v1 single `dueDate` |
-| `updatedStartDate` | `Date` \| `null` | no | Forecast revision |
-| `updatedDueDate` | `Date` \| `null` | no | Forecast revision |
-| `actualStartDate` | `Date` \| `null` | no | |
-| `actualCompletionDate` | `Date` \| `null` | no | Typically set when status → `done` |
+| `assigneeId` | `string` (UUID) \| `null` | no | FK → `User.id` when PIC is a registered project member; `null` for unassigned or custom-text PICs |
+| `assigneeName` | `string` | yes | Display name for the PIC. For registered members, mirrors the user's `name`; for custom PICs, stores the free-text label (e.g. "Mr X"). Use `""` when unassigned. Stored as a non-null column with default `""` in PostgreSQL (not `null`). |
+| `initialStartDate` | `Date` \| `null` | no | Baseline plan start (renamed from planned start). Default on create: today. |
+| `initialDueDate` | `Date` \| `null` | no | Baseline plan due. Default on create: today + 7 days. |
+| `updatedStartDate` | `Date` \| `null` | no | Forecast revision; default on create mirrors `initialStartDate` |
+| `updatedDueDate` | `Date` \| `null` | no | Forecast revision; default on create mirrors `initialDueDate` |
+| `actualStartDate` | `Date` \| `null` | no | Must not be a future date (≤ today) |
+| `actualCompletionDate` | `Date` \| `null` | no | Typically set when status → `done` or progress → 100%; must not be a future date |
+| `progress` | `number` (0–100) | yes | Default by status: todo=0, in_progress=1, done=100 |
+| `sortOrder` | `number` | yes | Order within a Kanban status column; default `0` |
 | `createdAt` | `DateTime` | yes | |
 | `updatedAt` | `DateTime` | yes | |
 
@@ -184,16 +191,22 @@ interface Task {
   priority: TaskPriority;
   bucket: TaskBucket;
   assigneeId: string | null;
-  plannedStartDate: string | null;
-  plannedDueDate: string | null;
+  /** PIC display name — empty string when unassigned. */
+  assigneeName: string;
+  initialStartDate: string | null;
+  initialDueDate: string | null;
   updatedStartDate: string | null;
   updatedDueDate: string | null;
   actualStartDate: string | null;
   actualCompletionDate: string | null;
+  progress: number;
+  sortOrder: number;
   createdAt: string;
   updatedAt: string;
 }
 ```
+
+> **PIC display logic (application layer):** Derive labels and analytics grouping keys from `assigneeId` + `assigneeName` (see `src/lib/assignee-display.ts`). A custom PIC is identified by `assigneeId === null` and a non-empty `assigneeName`. Registered PICs may retain `assigneeName` even if the user is later removed from the project (historical display).
 
 ### 3.5 Subtask / Checklist
 
@@ -213,6 +226,7 @@ interface Subtask {
   taskId: string;
   title: string;
   isCompleted: boolean;
+  sortOrder?: number;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -244,7 +258,7 @@ interface TaskComment {
 User 1 ──< Project (ownerId)
 User * ──< Project (permittedUserIds / ProjectMember)
 Project 1 ──< Task many
-User 1 ──< Task (assigneeId) many
+User 1 ──< Task (assigneeId) many — optional FK; `assigneeName` denormalised on Task for display (registered + custom PICs)
 Task 1 ──< Subtask many
 Task 1 ──< TaskComment many
 User 1 ──< TaskComment many
@@ -256,7 +270,7 @@ User 1 ──< TaskComment many
 - `isOverdue(task)` — effective due date in the past and `status !== 'done'`
 - `effectiveStartDate` / `effectiveDueDate` — prefer updated dates when present, else planned
 - `checklistProgress(taskId)` — completed / total subtasks
-- Analytics aggregates for F-205 (status distribution, overdue count, workload by `assigneeId`)
+- Analytics aggregates for F-205 (status distribution, overdue count, workload by PIC — `assigneeId` for registered users, normalised `assigneeName` for custom PICs)
 
 ### 3.9 Prisma sketch (illustrative)
 
@@ -309,7 +323,17 @@ model Project {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   tasks       Task[]
-  // members via ProjectMember
+  members     ProjectMember[]
+}
+
+model ProjectMember {
+  id        String   @id @default(uuid()) @db.Uuid
+  projectId String   @db.Uuid
+  userId    String   @db.Uuid
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
 }
 
 model Task {
@@ -321,15 +345,19 @@ model Task {
   priority             TaskPriority  @default(medium)
   bucket               TaskBucket    @default(executing)
   assigneeId           String?       @db.Uuid
-  plannedStartDate     DateTime?     @db.Date
-  plannedDueDate       DateTime?     @db.Date
+  assigneeName         String        @default("")
+  initialStartDate     DateTime?     @db.Date
+  initialDueDate       DateTime?     @db.Date
   updatedStartDate     DateTime?     @db.Date
   updatedDueDate       DateTime?     @db.Date
   actualStartDate      DateTime?     @db.Date
   actualCompletionDate DateTime?     @db.Date
+  progress             Int           @default(0)
+  sortOrder            Int           @default(0)
   createdAt            DateTime      @default(now())
   updatedAt            DateTime      @updatedAt
   project              Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignee             User?         @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
   subtasks             Subtask[]
   comments             TaskComment[]
 }
@@ -339,6 +367,7 @@ model Subtask {
   taskId      String   @db.Uuid
   title       String
   isCompleted Boolean  @default(false)
+  sortOrder   Int      @default(0)
   task        Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
 }
 
@@ -392,7 +421,7 @@ Suggested surfaces:
 | List tasks by project | Requires project access |
 | Get task by id | Requires project access |
 | Create task | Member+ on assigned projects; PM/Super PM per Section 5 |
-| Update task fields | Title, description, priority, bucket, assignee, dates |
+| Update task fields | Title, description, priority, bucket, assignee (`assigneeId` + `assigneeName`), dates |
 | Update task status (Kanban DnD) | Dedicated mutation for drag-and-drop; validate status enum; optional auto-set `actualStartDate` / `actualCompletionDate` |
 | Delete task | Per RBAC; cascade subtasks and comments |
 
@@ -412,7 +441,7 @@ Suggested surfaces:
 |-------|--------|
 | Status distribution | Counts / percentages by `TaskStatus` for a project |
 | Overdue tasks | Incomplete tasks past effective due date |
-| Workload by PIC | Group by `assigneeId` (open vs done, overdue) |
+| Workload by PIC | Group by stable PIC key: registered users by `assigneeId`, custom PICs by normalised `assigneeName` (open vs done, overdue) |
 | Optional timeline health | Planned vs actual date variance for Gantt/dashboard |
 
 Prefer server-side aggregation (SQL/`groupBy`) over shipping full task lists solely for charts when datasets grow.
@@ -521,7 +550,7 @@ Privileges are evaluated as **global role** combined with **project ownership / 
 | Network disconnect / timeout | Optimistic Kanban rollback; offline banner; retry-safe actions |
 | Project / task not found | Dedicated empty/404 UI with navigation home |
 | Delete project with many tasks | Single transactional cascade |
-| Assignee removed from project | Keep historical `assigneeId` or null out with warning; prevent new assigns to non-members |
+| Assignee removed from project | Retain historical `assigneeId` / `assigneeName` on existing tasks for audit display; prevent new registered assigns to non-members (server validation) |
 | Concurrent Kanban moves | Last-write-wins or version check; UI refreshes to server state |
 | Supabase / DB unavailable | Friendly error page; no partial silent failure on writes |
 | Viewer attempts POST via crafted request | Server returns 403 |
@@ -541,8 +570,10 @@ Privileges are evaluated as **global role** combined with **project ownership / 
 1. Bump `updatedAt` on every entity mutation; bump parent `Project.updatedAt` when tasks change.
 2. Deleting a project cascades tasks, subtasks, and comments.
 3. No orphan tasks (`projectId` must exist).
-4. Effective dates for Gantt/analytics: prefer updated dates when set, else planned.
-5. When status becomes `done`, set `actualCompletionDate` if empty; when leaving `done`, clear or retain per documented policy (default: retain until manually cleared).
+4. Effective dates for Gantt/analytics: prefer updated dates when set, else initial.
+5. Status ↔ progress stay consistent: 0% = To Do, 1–99% = Doing, 100% = Done. Moving to Doing preserves an existing 1–99% value; 0% or 100% become 1%.
+6. Backward status moves clear actual dates: To Do clears start + completion; Doing clears completion and sets start to today if empty; Done sets completion (and start if empty) to **local** today.
+7. Calendar dates are always local `YYYY-MM-DD` (never `toISOString().slice(0, 10)`). `actualStartDate` / `actualCompletionDate` must not be future local dates.
 
 ---
 
@@ -556,7 +587,7 @@ Build in three waves so each ends with a demoable increment. Version 1.0 capabil
 
 **Deliver:**
 
-- Expand domain types for priority, bucket, multi-dates, assignee placeholder, subtasks
+- Expand domain types for priority, bucket, multi-dates, assignee fields (`assigneeId`, `assigneeName`), subtasks
 - Project detail: interactive Kanban (F-201) with drag-and-drop between To Do / Doing / Done
 - Task detail drawer with Planner-style fields (F-202 minus live multi-user comments if backend not ready—use local/mock persistence if needed)
 - Carry forward v1 project/task CRUD UX patterns into the new board-centric layout
@@ -594,10 +625,11 @@ Build in three waves so each ends with a demoable increment. Version 1.0 capabil
 
 **Deliver:**
 
-- Interactive Gantt view by duration, dates, and Assignee/PIC
+- Interactive Gantt view by duration, dates, and Assignee/PIC (registered and custom)
 - Project progress dashboard: status distribution, overdue tracking, workload per PIC
 - Task comments/chat persisted via `TaskComment` APIs
-- Hardening: corrupt date handling on Gantt, network failure UX, RBAC on analytics and comments
+- Flexible PIC assignment (F-202 enhancement): member dropdown + custom free-text PIC in task drawer; shared display helpers across Kanban, Gantt, and analytics
+- Hardening: corrupt date handling on Gantt, Recharts deferred mount in hidden tab panels, network failure UX, RBAC on analytics and comments
 - Polish pass: performance of aggregation queries, loading skeletons, mobile layout
 
 **Exit criteria:** Authenticated users can analyse progress, inspect timelines on Gantt, and collaborate via comments within their permitted projects—completing the Version 2.0 North Star scope.
@@ -650,8 +682,8 @@ flowchart TD
 | LocalStorage `AppStore` | PostgreSQL via Prisma |
 | Implicit single user | Supabase Auth + RBAC |
 | Status list / filters | Kanban board (primary) + retained status model |
-| Single `dueDate` | Planned / updated / actual date set |
-| No priorities, buckets, subtasks, comments | Full Planner-style task details |
+| Single `dueDate` | Initial / updated / actual date set + progress % |
+| No priorities, buckets, subtasks, comments | Full Planner-style task details (including flexible PIC assignment) |
 | No analytics / Gantt | Dashboard widgets + Gantt timeline |
 | `localhost` only | `tracker.local` local domain support |
 

@@ -1,0 +1,757 @@
+# Simple Project Task Tracker 2.0 — Technical Specification
+
+**Document:** `dev_spec.md`  
+**Product:** Simple Project Task Tracker 2.0  
+**Status:** Single source of truth for implementation (aligned with codebase as of Wave 3 UAT close-out)  
+**Language:** Australian English  
+**Companion documents:**
+| Document | Role |
+|----------|------|
+| [`doc/dev_plan.md`](./dev_plan.md) | North Star product blueprint and roadmap |
+| [`doc/dev_proc.md`](./dev_proc.md) | Chronological execution journal, prompts, and UAT log |
+| [`doc/supabase-security.md`](./supabase-security.md) | RLS and Supabase advisory remediation |
+| [`doc/dev_spec.md`](./dev_spec.md) | **This file** — technical specification for engineers, PMs, and AI collaborators |
+
+**Repository:** `https://github.com/yugoananda-pg/simple-project-task-tracker-v02.git`  
+**Last updated:** 9 September 2026  
+
+---
+
+## 1. Executive Summary & Product Vision
+
+### 1.1 System overview
+
+Simple Project Task Tracker 2.0 is a multi-user, cloud-backed project and task management web application. Teams organise work into projects, manage tasks across a Kanban board (To Do / Doing / Done), edit Planner-style task details (process groups, priorities, multi-date tracking, progress, checklists, comments, and flexible PIC assignment), inspect timelines on an interactive Gantt chart, and review progress analytics.
+
+Identity is provided by **Supabase Auth**. Application data lives in **Supabase PostgreSQL** and is accessed exclusively through **Next.js Server Actions** and **Prisma** (not through the Supabase Data API from the browser). Authorisation is enforced server-side via a custom **RBAC** layer.
+
+### 1.2 Core philosophy
+
+| Principle | Meaning in this product |
+|-----------|-------------------------|
+| **Server is source of truth** | UI may hide controls; every mutation re-checks session + project access |
+| **Fail closed** | Ambiguous role or membership → deny |
+| **Optimistic UX, durable persistence** | Kanban and drawer updates feel instant; PostgreSQL remains authoritative |
+| **Local calendar integrity** | Task date fields are calendar days (`YYYY-MM-DD`), never UTC-shifted ISO prefixes |
+| **Defensive visualisation** | Gantt and analytics clamp corrupt/inverted dates; never crash the surface |
+| **Australian English UX** | Labels, errors, tooltips, and documentation use AU spelling and `DD/MM/YYYY` |
+
+### 1.3 Target roles
+
+| Role (`GlobalRole`) | Intent |
+|---------------------|--------|
+| **Super PM** (`super_pm`) | Platform administrator. First registered user is auto-promoted. Full CRUD across all projects and tasks; may run database seed. |
+| **PM** (`pm`) | Project manager. Creates projects; **admin** on owned projects; **read-only** on projects where they are a member but not owner. |
+| **Member** (`member`) | Contributor on assigned projects (`ProjectMember`). Create/edit tasks, move Kanban cards, checklists, comments. Cannot create projects. |
+| **Viewer** (`viewer`) | Read-only on permitted projects. Browse List / Kanban / Gantt / Analytics and open the drawer; cannot mutate. |
+
+Access is resolved per project into levels: `none` | `read` | `write` | `admin` (see Section 7).
+
+### 1.4 Transition from v1.0 to v2.0
+
+| Aspect | v1.0 MVP | v2.0 |
+|--------|----------|------|
+| Persistence | Browser LocalStorage | Supabase PostgreSQL via Prisma 7 |
+| Users | Single-user | Multi-user with roles |
+| Auth | None | Supabase Auth (email/password) |
+| Views | List-centric | List, Kanban, Gantt, Analytics |
+| Task model | Basic status | Process groups, priorities, six dates, progress, PIC, checklists, comments |
+| Legacy store | — | `src/lib/store.ts` retained as Wave 1 reference only; **not** used by live routes |
+
+Version 2.0 was delivered in three waves (see `dev_proc.md`): Wave 1 UI → Wave 2 cloud/RBAC → Wave 3 Gantt/analytics/comments.
+
+---
+
+## 2. Complete Tech Stack & Architecture
+
+### 2.1 Stack matrix
+
+| Layer | Technology | Notes |
+|-------|------------|-------|
+| Framework | **Next.js 16** (App Router) | React Server Components by default; interactive islands as Client Components |
+| Mutations | **Server Actions** (`"use server"`) | Projects, tasks, comments, auth, seed |
+| Language | **TypeScript** (strict) | Domain types in `src/lib/types.ts` |
+| UI | **React 19** + **Tailwind CSS 4** | Dark zinc/slate canvas; high-contrast badges |
+| Icons | **Lucide React** | Close, eye, check, etc. |
+| DnD | **@hello-pangea/dnd** | Kanban horizontal + vertical reorder |
+| Charts | **Recharts 3** | Analytics donut + stacked bars; deferred mount when tab hidden |
+| Dates | **date-fns 4** | Local calendar math, AU formatting, Gantt columns |
+| Auth | **@supabase/ssr** + **@supabase/supabase-js** | Cookie sessions; middleware refresh |
+| ORM | **Prisma 7** + **@prisma/adapter-pg** | `prisma.config.ts` holds URLs; runtime uses transaction pooler |
+| Database | **PostgreSQL** (Supabase) | Session pooler `:5432` for migrations; transaction pooler `:6543` for app |
+| Seed runner | **tsx** | `package.json` → `"prisma": { "seed": "npx tsx prisma/seed.ts" }` |
+
+### 2.2 Runtime architecture
+
+```
+Browser (Client Components: Kanban, Drawer, Gantt, Analytics)
+        │  Server Actions / RSC props
+        ▼
+Next.js App Router  (app/, src/middleware.ts)
+        │  requireSessionUser + getProjectAccess
+        ▼
+RBAC  (src/lib/rbac.ts)
+        ▼
+Prisma Client + PrismaPg adapter  (src/lib/prisma.ts)
+        │  DATABASE_URL → pooler :6543
+        ▼
+Supabase PostgreSQL
+
+Supabase Auth ←→ @supabase/ssr (client / server / middleware)
+```
+
+### 2.3 Key design decisions
+
+1. **No browser PostgREST access** — RLS is enabled with privileges revoked from `anon`/`authenticated`; the app uses Prisma as the database role (bypasses RLS). See `doc/supabase-security.md`.
+2. **Prisma 7 config** — Datasource URLs live in `prisma.config.ts` (not inline in `schema.prisma`).
+3. **DTO mapping** — Prisma rows are mapped to string-dated domain types via `src/lib/mappers.ts` (`YYYY-MM-DD` for `@db.Date` fields).
+4. **Action result envelope** — Mutations return `ActionResult<T>` (`success` + `data` | `error` + `code`); thrown domain errors use `ActionError` (Section 5.1).
+5. **App Router location** — Routes live under repository-root `app/` (not `src/app`). Shared libraries and components live under `src/`.
+
+### 2.4 Environment variables (`.env.local`)
+
+| Variable | Purpose |
+|----------|---------|
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Public anon key (Auth only) |
+| `DIRECT_URL` | Session pooler (`:5432`) — migrations / CLI |
+| `DATABASE_URL` | Transaction pooler (`:6543`) — runtime Prisma |
+
+Never commit `.env.local`. URL-encode special characters in database passwords (e.g. `@` → `%40`). Prefer the IPv4 pooler host when direct `db.*.supabase.co` fails on IPv6-only networks.
+
+---
+
+## 3. Comprehensive Directory & File Inventory
+
+### 3.1 Repository tree (application-relevant)
+
+```
+Simple Project Task Tracker 2.0/
+├── app/                          # Next.js App Router (routes + layout)
+│   ├── layout.tsx
+│   ├── page.tsx                  # Home — project list
+│   ├── globals.css
+│   ├── login/page.tsx
+│   ├── register/page.tsx
+│   └── projects/[id]/
+│       ├── page.tsx              # Project hub (RSC)
+│       └── loading.tsx
+├── src/
+│   ├── middleware.ts             # Session refresh + auth redirects
+│   ├── components/
+│   │   ├── analytics/
+│   │   ├── auth/
+│   │   ├── gantt/
+│   │   ├── kanban/
+│   │   ├── layout/
+│   │   ├── projects/
+│   │   ├── providers/
+│   │   ├── tasks/
+│   │   └── ui/
+│   └── lib/
+│       ├── actions/
+│       ├── analytics/
+│       ├── gantt/
+│       ├── seed/
+│       ├── supabase/
+│       └── *.ts                  # types, rbac, prisma, mappers, …
+├── prisma/
+│   ├── schema.prisma
+│   ├── seed.ts
+│   ├── migrations/
+│   └── …
+├── prisma.config.ts
+├── doc/
+│   ├── dev_plan.md
+│   ├── dev_proc.md
+│   ├── dev_spec.md               # This specification
+│   └── supabase-security.md
+├── package.json
+├── next.config.ts
+├── tsconfig.json
+├── AGENTS.md / CLAUDE.md         # Agent guidance (Next.js docs reminder)
+└── README.md
+```
+
+### 3.2 App Router pages (`app/`)
+
+| Path | Type | Responsibility |
+|------|------|----------------|
+| `app/layout.tsx` | RSC layout | Root shell, fonts, dark canvas, `AuthSessionProvider`, `ToastProvider`, `AppHeader` |
+| `app/page.tsx` | RSC | Loads `listProjects()`; renders `HomePageClient` |
+| `app/login/page.tsx` | RSC | Login page shell; hosts `LoginForm` |
+| `app/register/page.tsx` | RSC | Registration page shell; hosts `RegisterForm` |
+| `app/projects/[id]/page.tsx` | RSC | Loads project + tasks + session; renders `ProjectDetailView` |
+| `app/projects/[id]/loading.tsx` | Loading UI | Route-level skeleton while project data resolves |
+| `app/globals.css` | Styles | Global Tailwind entry + view transitions |
+
+### 3.3 Middleware
+
+| Path | Exports | Responsibility |
+|------|---------|----------------|
+| `src/middleware.ts` | `middleware`, `config.matcher` | Delegates to Supabase session updater on all non-static routes |
+| `src/lib/supabase/middleware.ts` | `updateSession` | Refreshes cookies; redirects unauthenticated users away from app routes; redirects authenticated users away from `/login` and `/register` |
+
+### 3.4 Layout & providers
+
+| Path | Exports | Responsibility |
+|------|---------|----------------|
+| `src/components/layout/AppHeader.tsx` | default async | Header with Projects nav (signed-in only), user dropdown or Sign In |
+| `src/components/layout/UserDropdownMenu.tsx` | default, `UserDropdownMenuProps` | Name trigger; email; role badge; Sign Out (`signOutAction`) |
+| `src/components/providers/AuthSessionProvider.tsx` | default | `onAuthStateChange` + `BroadcastChannel` multi-tab sync + focus refresh |
+| `src/components/providers/ToastProvider.tsx` | default, `useToast` | Global toast queue for Australian English success/error messages |
+
+### 3.5 Auth UI
+
+| Path | Exports | Responsibility |
+|------|---------|----------------|
+| `src/components/auth/LoginForm.tsx` | `LoginForm` | Email/password form → `signInAction` |
+| `src/components/auth/RegisterForm.tsx` | default | Name/email/password → `signUpAction` |
+| `src/components/auth/PasswordInput.tsx` | default | Password field with Eye / EyeOff toggle |
+| `src/components/auth/auth-validation.ts` | `validateEmail`, `validatePassword`, `validateName`, `validateConfirmPassword`, `mapAuthError` | Client-side validation helpers |
+
+### 3.6 Project surfaces
+
+| Path | Exports | Responsibility |
+|------|---------|----------------|
+| `src/components/projects/HomePageClient.tsx` | default | Project cards; “+ New Project” modal (`createProject`); empty/error states |
+| `src/components/projects/ProjectDetailView.tsx` | default, `ProjectDetailViewProps` | **Project hub** — view tabs (list/kanban/gantt/analytics), optimistic task state, drawer orchestration, delete project, Add Task per Kanban column |
+| `src/components/projects/ReadOnlyAccessNotice.tsx` | default | Banner for `read` access / Viewer |
+| `src/components/projects/ProjectTasksSkeleton.tsx` | default | Placeholder while tasks hydrate |
+
+### 3.7 Kanban & task drawer
+
+| Path | Exports | Responsibility |
+|------|---------|----------------|
+| `src/components/kanban/KanbanBoard.tsx` | default, `KanbanBoardProps` | `DragDropContext`; three columns; drag end → status/`sortOrder` callbacks |
+| `src/components/kanban/KanbanColumn.tsx` | default, `KanbanColumnProps` | Droppable column; header count; “+ Add Task”; empty target |
+| `src/components/kanban/TaskCard.tsx` | default, `TaskCardProps` | Draggable card; priority/process group; PIC; due/overdue; progress cue |
+| `src/components/kanban/TaskDetailDrawer.tsx` | default, `TaskDetailDrawerProps` | Planner drawer: fields, progress, dates, checklist, comments, PIC, delete task |
+| `src/components/tasks/TaskListView.tsx` | default, `TaskListViewProps` | Traditional list rows → open drawer |
+| `src/components/tasks/AssigneePicField.tsx` | default | Searchable member combobox + custom free-text PIC |
+| `src/components/tasks/PicLabel.tsx` | default | PIC display + subtle **Custom** badge for unregistered names |
+
+### 3.8 Gantt & analytics
+
+| Path | Exports | Responsibility |
+|------|---------|----------------|
+| `src/components/gantt/ProjectGanttView.tsx` | default, `ProjectGanttViewProps`, `GanttGroupMode` | Interactive Gantt: Week/Month, Task list \| Assignee/PIC, triple bars, Today line, freeze-panes, portal tooltips |
+| `src/components/analytics/ProjectAnalyticsView.tsx` | default, `ProjectAnalyticsViewProps` | KPI cards + Recharts; mounts charts only when `chartsVisible` |
+
+### 3.9 Shared UI primitives
+
+| Path | Exports | Responsibility |
+|------|---------|----------------|
+| `src/components/ui/ConfirmDialog.tsx` | default | Modal confirm for destructive actions |
+| `src/components/ui/InstantHoverTip.tsx` | default | 0 ms delay tooltip (disabled buttons, Gantt cues) |
+
+### 3.10 Library — domain & infrastructure
+
+| Path | Responsibility |
+|------|----------------|
+| `src/lib/types.ts` | Canonical TypeScript unions and interfaces (`User`, `Project`, `Task`, …) |
+| `src/lib/prisma.ts` | Prisma Client singleton with `PrismaPg` adapter |
+| `src/lib/mappers.ts` | Prisma → domain DTO mapping (`mapUser`, `mapProject`, `mapTask`, …) |
+| `src/lib/rbac.ts` | Session bootstrap, access levels, assert helpers, visibility filter |
+| `src/lib/permissions.ts` | Client-side `canDeleteTaskUi` mirror of server delete rules |
+| `src/lib/role-labels.ts` | Display labels: Super PM, PM, Member, Viewer |
+| `src/lib/task-defaults.ts` | Local dates, progress↔status sync, defaults, future-date checks |
+| `src/lib/assignee-display.ts` | PIC display name, custom detection, initials, grouping keys |
+| `src/lib/store.ts` | **Legacy Wave 1 LocalStorage store** — do not use for new features |
+| `src/lib/gantt/date-utils.ts` | Parse/clamp dates; timeline columns; pixel bar/Today geometry; Actual range |
+| `src/lib/analytics/task-metrics.ts` | `computeProjectAnalytics` aggregates for F-205 |
+| `src/lib/seed/database-seed.ts` | Wipe + Wave 3 UAT seed; `createSeedPrismaClient`; `SeedSummary` |
+
+### 3.11 Library — Supabase helpers
+
+| Path | Exports | Responsibility |
+|------|---------|----------------|
+| `src/lib/supabase/env.ts` | `getSupabaseEnv` | Validates public URL + anon key |
+| `src/lib/supabase/client.ts` | `createClient` | Browser client |
+| `src/lib/supabase/server.ts` | `createClient` | Server client (cookies) |
+| `src/lib/supabase/middleware.ts` | `updateSession` | Edge session refresh + redirects |
+
+### 3.12 Library — Server Actions
+
+| Path | Responsibility |
+|------|----------------|
+| `src/lib/actions/errors.ts` | `ActionError`, `ActionResult`, `actionSuccess`, `actionFailure` |
+| `src/lib/actions/auth.ts` | Sign in / up / out; session helpers |
+| `src/lib/actions/projects.ts` | List / get / create / delete projects |
+| `src/lib/actions/tasks.ts` | Task CRUD, reorder, subtasks |
+| `src/lib/actions/comments.ts` | List / create / delete comments |
+| `src/lib/actions/seed.ts` | Super-PM-only `runDatabaseSeedAction` |
+
+### 3.13 Prisma & documentation
+
+| Path | Responsibility |
+|------|----------------|
+| `prisma/schema.prisma` | Models, enums, indexes, cascades |
+| `prisma.config.ts` | Prisma 7 config; migration datasource = `DIRECT_URL` |
+| `prisma/seed.ts` | CLI entry → `resetAndSeedDatabase` |
+| `prisma/migrations/*` | Versioned SQL (init, assigneeName, RLS, initial/progress/sortOrder) |
+| `doc/*` | Plan, process journal, this spec, security notes |
+
+---
+
+## 4. Domain Models & Database Schema Specification
+
+Canonical persistence: `prisma/schema.prisma`. Application DTOs: `src/lib/types.ts`. Dates in the API layer are **strings** (`YYYY-MM-DD` or ISO timestamps); Prisma stores calendar fields as `@db.Date`.
+
+### 4.1 Enums
+
+| Enum | Values | UI labels (typical) |
+|------|--------|---------------------|
+| `GlobalRole` | `super_pm`, `pm`, `member`, `viewer` | Super PM, PM, Member, Viewer |
+| `TaskStatus` | `todo`, `in_progress`, `done` | To Do, Doing, Done |
+| `TaskPriority` | `urgent`, `important`, `medium`, `low` | Urgent, Important, Medium, Low |
+| `TaskBucket` | `initiating`, `planning`, `executing`, `monitoring`, `closing` | Process Groups (PMBOK-aligned UI label) |
+
+### 4.2 `User`
+
+| Field | Type | Constraints | Notes |
+|-------|------|-------------|-------|
+| `id` | `Uuid` | PK | Matches Supabase Auth `auth.users.id` |
+| `email` | `String` | Unique | |
+| `name` | `String` | Required | |
+| `globalRole` | `GlobalRole` | Required | First user → `super_pm`; else default `member` on bootstrap |
+| `createdAt` | `DateTime` | `@default(now())` | |
+| `updatedAt` | `DateTime` | `@updatedAt` | |
+
+**Relations:** `ownedProjects`, `projectMembers`, `assignedTasks`, `comments`.
+
+### 4.3 `Project`
+
+| Field | Type | Constraints | Notes |
+|-------|------|-------------|-------|
+| `id` | `Uuid` | PK `@default(uuid())` | |
+| `name` | `String` | Required; app max 100 chars | |
+| `description` | `String` | `@default("")`; app max 500 chars | |
+| `ownerId` | `Uuid` | FK → `User` | Indexed |
+| `createdAt` / `updatedAt` | `DateTime` | Defaults / `@updatedAt` | |
+
+**Relations:** `owner`, `members` (`ProjectMember[]`), `tasks` (`Task[]`).  
+**DTO:** `permittedUserIds: string[]` derived from members in `mapProject`.
+
+### 4.4 `ProjectMember`
+
+| Field | Type | Constraints |
+|-------|------|-------------|
+| `id` | `Uuid` | PK |
+| `projectId` | `Uuid` | FK → `Project`, `onDelete: Cascade` |
+| `userId` | `Uuid` | FK → `User`, `onDelete: Cascade` |
+| `createdAt` | `DateTime` | `@default(now())` |
+
+**Constraints:** `@@unique([projectId, userId])`; index on `userId`.
+
+### 4.5 `Task`
+
+| Field | Type | Default / constraints | Notes |
+|-------|------|----------------------|-------|
+| `id` | `Uuid` | PK | |
+| `projectId` | `Uuid` | FK Cascade | Indexed |
+| `title` | `String` | App max 200 chars | |
+| `description` | `String` | `@default("")` | |
+| `status` | `TaskStatus` | `@default(todo)` | |
+| `priority` | `TaskPriority` | `@default(medium)` | |
+| `bucket` | `TaskBucket` | `@default(executing)` | UI: Process Group |
+| `assigneeId` | `Uuid?` | FK → `User`, `onDelete: SetNull` | Registered PIC |
+| `assigneeName` | `String` | **`@default("")`** | Display name; custom PIC when `assigneeId` is null |
+| `initialStartDate` | `Date?` | `@db.Date` | Formerly planned start |
+| `initialDueDate` | `Date?` | `@db.Date` | Formerly planned due |
+| `updatedStartDate` | `Date?` | `@db.Date` | |
+| `updatedDueDate` | `Date?` | `@db.Date` | Preferred for overdue when set |
+| `actualStartDate` | `Date?` | `@db.Date` | |
+| `actualCompletionDate` | `Date?` | `@db.Date` | |
+| `progress` | `Int` | **`@default(0)`** | 0–100 |
+| `sortOrder` | `Int` | **`@default(0)`** | Order within status column |
+| `createdAt` / `updatedAt` | `DateTime` | | |
+
+**Indexes:** `[projectId]`; composite `[projectId, status, sortOrder]`.  
+**Create defaults (application):** initial start = local today; initial due = today + 7 days; updated dates mirror initial; progress from status (0 / 1 / 100); `sortOrder` = min(column) − 1 (top of column).
+
+### 4.6 `Subtask`
+
+| Field | Type | Default |
+|-------|------|---------|
+| `id` | `Uuid` | PK |
+| `taskId` | `Uuid` | FK Cascade |
+| `title` | `String` | |
+| `isCompleted` | `Boolean` | `false` |
+| `sortOrder` | `Int` | `0` |
+| `createdAt` / `updatedAt` | `DateTime` | |
+
+Indexed on `taskId`.
+
+### 4.7 `TaskComment`
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | `Uuid` | PK |
+| `taskId` | `Uuid` | FK Cascade |
+| `userId` | `Uuid` | FK Cascade (author) |
+| `content` | `String` | App max 4,000 chars |
+| `createdAt` | `DateTime` | `@default(now())` |
+
+Indexes on `taskId`, `userId`.
+
+### 4.8 Cascade & orphan rules
+
+| Parent deleted | Children |
+|----------------|----------|
+| `Project` | Members, tasks (and thus subtasks/comments) cascade |
+| `Task` | Subtasks and comments cascade |
+| `User` (member row) | `ProjectMember` cascades; assigned tasks get `assigneeId` set null |
+| Comment author user deleted | Comment cascades with user |
+
+There is no orphan task retention after project delete — cascade is intentional.
+
+### 4.9 Migration history (reference)
+
+| Migration | Purpose |
+|-----------|---------|
+| `20260828233113_init` | Initial schema |
+| `20260830140000_add_task_assignee_name` | `assigneeName` |
+| `20260901170000_enable_rls_harden_public_schema` | Enable RLS; revoke API roles |
+| `20260905120000_rename_planned_to_initial_and_add_progress` | Rename planned→initial; add `progress`, `sortOrder` |
+
+---
+
+## 5. API Surface & Server Actions Specification
+
+### 5.1 Error and result contracts
+
+There are **no** separate `ForbiddenError` / `ValidationError` classes. Domain failures use a single class:
+
+```ts
+class ActionError extends Error {
+  code: "UNAUTHORISED" | "FORBIDDEN" | "NOT_FOUND" | "VALIDATION";
+}
+```
+
+| Code | Typical HTTP analogy | When thrown |
+|------|----------------------|-------------|
+| `UNAUTHORISED` | 401 | No session |
+| `FORBIDDEN` | 403 | Authenticated but insufficient role/access |
+| `NOT_FOUND` | 404 | Missing project/task/comment |
+| `VALIDATION` | 400 | Empty titles, bad dates, future actual dates, length limits |
+
+Envelope returned to clients:
+
+```ts
+type ActionResult<T> =
+  | { success: true; data: T }
+  | { success: false; error: string; code?: ActionError["code"] };
+```
+
+Helpers: `actionSuccess(data)`, `actionFailure(error)` (maps `ActionError` → envelope). Auth form actions return `{ error?: string }` and may `redirect()`.
+
+### 5.2 Auth actions — `src/lib/actions/auth.ts`
+
+| Function | Signature | Auth | Behaviour |
+|----------|-----------|------|-----------|
+| `signInAction` | `(prev, FormData) → AuthActionState` | Public | Email/password; bootstrap profile; redirect |
+| `signUpAction` | `(prev, FormData) → AuthActionState` | Public | Validates name/password; first user → Super PM via bootstrap |
+| `signOutAction` | `() → void` | Session | Sign out; redirect `/login` |
+| `getCurrentSessionUser` | `() → SessionUser \| null` | Soft | |
+| `ensureAuthenticatedProfile` | `() → void` | Required | Throws `UNAUTHORISED` if missing |
+
+### 5.3 Project actions — `src/lib/actions/projects.ts`
+
+| Function | Signature | Permission | Returns |
+|----------|-----------|------------|---------|
+| `listProjects` | `() → ActionResult<ProjectListItem[]>` | Session; visibility filter | Projects with `access` + `taskCount` |
+| `getProjectById` | `(projectId) → ActionResult<{ project, access, canManage, canWriteTasks, memberUsers }>` | Read+ | Detail + roster |
+| `createProject` | `(input: { name; description? }) → ActionResult<Project>` | Super PM or PM | Creates project + owner membership |
+| `deleteProject` | `(projectId) → ActionResult<{ id }>` | Admin (Super PM or owning PM) | Cascade delete |
+
+**Validation:** name required ≤100; description ≤500.
+
+### 5.4 Task actions — `src/lib/actions/tasks.ts`
+
+| Function | Signature | Permission | Notes |
+|----------|-----------|------------|-------|
+| `listTasksByProject` | `(projectId) → ActionResult<Task[]>` | Read+ | Includes subtasks + comments; order status, sortOrder |
+| `createTask` | `(input: { projectId; title; description?; status? }) → ActionResult<Task>` | Write/Admin | Defaults dates/progress; top `sortOrder` |
+| `updateTaskFields` | `(taskId, patch: Partial<Task>) → ActionResult<Task>` | Write/Admin | Progress↔status side effects; PIC membership check; actual dates not future; auto top `sortOrder` on status change unless `sortOrder` provided |
+| `updateTaskStatus` | `(taskId, status) → ActionResult<Task>` | Write/Admin | Delegates to `updateTaskFields` |
+| `reorderTasks` | `(input: { projectId; orderedTaskIds; status }) → ActionResult<{ ok: true }>` | Write/Admin | Sets `sortOrder` = index; applies status side effects when column changes |
+| `toggleSubtask` | `(taskId, subtaskId, isCompleted) → ActionResult<Task>` | Write/Admin | |
+| `addSubtask` | `(taskId, title) → ActionResult<Task>` | Write/Admin | |
+| `deleteTask` | `(taskId) → ActionResult<{ id }>` | Admin **or** assigned PIC (`assigneeId === user.id`) | Cascades subtasks/comments |
+
+**PIC rules on update:**
+- Registered: `assigneeId` must be a `ProjectMember`; `assigneeName` defaults to user name.
+- Custom: `assigneeId` null; `assigneeName` free text ≤120 chars (may be `""`).
+
+### 5.5 Comment actions — `src/lib/actions/comments.ts`
+
+| Function | Signature | Permission | Returns |
+|----------|-----------|------------|---------|
+| `getTaskComments` | `(taskId) → ActionResult<TaskCommentWithAuthor[]>` | Project access ≠ `none` | Ascending by `createdAt` |
+| `createComment` | `(taskId, content) → ActionResult<TaskCommentWithAuthor>` | Write/Admin (`read` forbidden) | Content ≤4,000 |
+| `deleteComment` | `(commentId) → ActionResult<{ id }>` | Super PM **or** author **or** project owner | |
+
+### 5.6 Seed action — `src/lib/actions/seed.ts`
+
+| Function | Permission | Behaviour |
+|----------|------------|-----------|
+| `runDatabaseSeedAction` | Super PM only | Calls `resetAndSeedDatabase`; revalidates layouts |
+
+CLI equivalent: `npx prisma db seed` (does not require Super PM session; uses DB credentials).
+
+### 5.7 RBAC helpers used by actions — `src/lib/rbac.ts` (selected)
+
+| Helper | Role |
+|--------|------|
+| `requireSessionUser` | Throws `UNAUTHORISED` |
+| `assertProjectRead` / `Write` / `Admin` | Throws `FORBIDDEN` |
+| `requireReadableProject` / `Writable` / `Admin` | Load + assert |
+| `getProjectAccess` | Resolve `none\|read\|write\|admin` |
+| `canCreateProject` / `canDeleteTask` / `canManageProject` | Boolean gates |
+| `bootstrapUserProfile` | First user → `super_pm` |
+| `projectsVisibilityFilter` | Prisma `where` for list |
+
+---
+
+## 6. UI/UX Mechanics & State Logic
+
+### 6.1 Project hub & multi-view tabs
+
+`ProjectDetailView` owns:
+
+- Local `tasks` state seeded from RSC props (optimistic merges on mutation).
+- `viewMode`: `"list" | "kanban" | "gantt" | "analytics"`.
+- Selected task id → `TaskDetailDrawer`.
+- Flags: `canWriteTasks`, `canManageProject`, `access`, `memberUsers`, `currentUserId`.
+
+Tab labels: **List View** | **Kanban Board** | **Gantt Chart** | **Analytics**.  
+Analytics stays in DOM but charts mount only when `chartsVisible` is true (avoids Recharts 0×0 measure).
+
+### 6.2 Kanban Board
+
+| Concern | Behaviour |
+|---------|-----------|
+| Columns | `todo` → To Do; `in_progress` → Doing; `done` → Done |
+| Cross-column DnD | Optimistic status move; `reorderTasks` / `updateTaskStatus` persist; rollback on failure |
+| Vertical DnD | Reorders within column; persists `sortOrder` via `reorderTasks` |
+| Top-of-column placement | Non-drag status changes (drawer/progress) set `sortOrder` to **min(column) − 1** so the card appears first |
+| Column “+ Add Task” | Opens create flow with that column’s status and default progress |
+| Header Add Task | Removed; columns are the sole create entry points |
+| Read-only | DnD and add disabled; `ReadOnlyAccessNotice` shown |
+
+### 6.3 Task Details Drawer
+
+| Area | Behaviour |
+|------|-----------|
+| Title / description | Local drafts; commit on blur |
+| Process Group / Priority / Status | Immediate patch with optimistic UI |
+| Progress | Range 0–100 + numeric draft; bidirectional sync with status (0→To Do; 1–99→Doing; 100→Done) |
+| Dates | Six fields: Initial Start/Due, Updated Start/Due, Actual Start/Completion; native `type="date"`; blur-sync; AU captions `DD/MM/YYYY` |
+| Actual date validation | Future dates blocked (client + server) |
+| PIC | `AssigneePicField`: pick member or type custom (e.g. “Mr X”); Custom badge via `PicLabel` |
+| Checklist | Toggle + add; progress bar “X of Y” |
+| Comments | Live list via `getTaskComments` / `createComment` / `deleteComment`; AU timestamps |
+| Delete task | Confirm dialog; permission via `canDeleteTaskUi` |
+| Tooltips | Instant tips on disabled Post/Add buttons |
+
+### 6.4 Gantt Chart
+
+| Feature | Specification |
+|---------|---------------|
+| Scales | **Week** / **Month** column toggles |
+| Grouping | **Task list** (rows grouped by Process Group) \| **Assignee / PIC** |
+| Bars | Stacked per row: **Initial** (zinc), **Updated** (sky), **Actual** (emerald) |
+| Actual open tasks | End exclusive at start of today — never past Today line |
+| Done Actual node | Circular checkmark at **right end** of Actual bar (`right-0` + half-width translate) |
+| Today | Red full-height `w-px` line under sticky header; **no** top circular node; hover tip “We're here — DD/MM/YYYY” follows cursor |
+| Freeze-panes | Sticky date header, sticky task rail, sticky corner cell |
+| Geometry | Day-proportional column widths; shared pixel offsets for bars and Today |
+| Tooltips | Portal, instant (0 ms), Initial/Updated/Actual date summaries |
+| Interaction | Click row/bar → opens `TaskDetailDrawer` |
+| Defensive | Missing/inverted dates clamped; corrupt strings skipped |
+
+Core math: `src/lib/gantt/date-utils.ts` (`parseTaskDate`, `getActualDateRange`, `getBarPositionPx`, `buildTimelineColumns`, …).
+
+### 6.5 Analytics Dashboard
+
+Powered by `computeProjectAnalytics(tasks)`:
+
+| Widget | Content |
+|--------|---------|
+| KPI cards | Total tasks, completion %, overdue count, active assignees |
+| Status distribution | Recharts donut — To Do (amber), Doing (sky), Done (emerald) |
+| Workload per PIC | Stacked bar — open vs completed; includes custom PICs |
+| Process groups | Progress bars for five Process Groups |
+| Overdue panel | List with PIC + days overdue (effective due = updated ?? initial) |
+
+Empty projects show Australian English empty states. Chart wrappers use `minWidth={0}` and `min-h-[300px]`.
+
+---
+
+## 7. Security, RBAC & Data Integrity Rules
+
+### 7.1 Role permission matrix
+
+| Action | Super PM | PM (owner) | PM (member, not owner) | Member (assigned) | Viewer (permitted) |
+|--------|----------|------------|------------------------|-------------------|--------------------|
+| View List / Kanban / Gantt / Analytics | ✓ | ✓ | Read | ✓ | ✓ |
+| Create project | ✓ | ✓ | ✗ | ✗ | ✗ |
+| Delete / manage project | ✓ | ✓ | ✗ | ✗ | ✗ |
+| Create / edit tasks | ✓ | ✓ | ✗ | ✓ | ✗ |
+| Kanban move / reorder | ✓ | ✓ | ✗ | ✓ | ✗ |
+| Checklist / comments | ✓ | ✓ | ✗ | ✓ | ✗ |
+| Delete task | ✓ | ✓ | ✗ | Assigned PIC only† | ✗ |
+| Delete comment | ✓ / author / owner | ✓ / author / owner | Author only* | Author | ✗ |
+| Run DB seed action | ✓ | ✗ | ✗ | ✗ | ✗ |
+
+\* Non-owning PM with read access cannot post; if somehow author on another project context, author delete still applies when access ≠ `none`.  
+† `canDeleteTask`: project `admin` **or** `task.assigneeId === user.id`.
+
+### 7.2 Access level resolution
+
+| Level | Who |
+|-------|-----|
+| `admin` | Super PM; PM who owns the project |
+| `write` | Member on `ProjectMember` |
+| `read` | Viewer on membership; PM who is member but not owner |
+| `none` | Everyone else (hidden from list) |
+
+### 7.3 Transport & data-plane security
+
+- Browser uses Supabase Auth only; **no** direct table queries via anon key.
+- RLS enabled; `anon`/`authenticated` privileges revoked on app tables (Prisma server role continues to operate).
+- Middleware refreshes session cookies; unauthenticated users cannot reach `/` or `/projects/*`.
+
+### 7.4 Data integrity rules
+
+| Rule | Implementation |
+|------|----------------|
+| **Local `YYYY-MM-DD`** | `toLocalDateString()` via `date-fns` `format(..., "yyyy-MM-dd")`; never `toISOString().slice(0, 10)` for calendar fields (WIB/UTC+ safety) |
+| **DB date round-trip** | Store at UTC noon (`localDateStringToDbDate`); map back with UTC Y/M/D getters |
+| **Backward status → To Do** | `progress = 0`; clear `actualStartDate` and `actualCompletionDate` |
+| **Backward status → Doing** | Progress 1% if was 0/100 (else keep mid); set start if null; **clear completion** |
+| **Forward → Done** | Progress 100; set completion (and start if null) to local today |
+| **Future actual dates** | Rejected (`VALIDATION`: “cannot be in the future”) |
+| **Effective due / overdue** | `updatedDueDate ?? initialDueDate`; done tasks not overdue |
+| **Registered PIC** | Must be project member |
+| **Cascade cleanup** | Deleting project/task removes dependent rows (no orphan tasks) |
+| **Gantt Actual clamp** | Open Actual ends at Today; inclusive Done bars end through completion day; node on bar end |
+
+---
+
+## 8. System Operations, Seeding & Maintenance Manual
+
+### 8.1 Prerequisites
+
+- Node.js compatible with Next.js 16
+- Supabase project (Auth + PostgreSQL)
+- `.env.local` configured (Section 2.4)
+
+### 8.2 Install & local development
+
+```bash
+cd "/Users/yugoananda/Cursor Project/Simple Project Task Tracker 2.0"
+npm install
+npm run dev
+# Open http://localhost:3000
+```
+
+### 8.3 Optional local domain (`tracker.local` — F-206)
+
+```bash
+sudo sh -c 'echo "127.0.0.1 tracker.local" >> /etc/hosts'
+```
+
+Point Supabase Auth site URL / redirects at the local host you actually use (`localhost` or `tracker.local`) so cookies behave consistently.
+
+### 8.4 Database migrations
+
+```bash
+# Develop / apply pending migrations (uses DIRECT_URL)
+npx prisma migrate dev
+
+# Or deploy existing migration history (CI / shared DB)
+npx prisma migrate deploy
+
+npx prisma generate
+```
+
+Named migrations historically used:
+
+```bash
+npx prisma migrate dev --name init
+npx prisma migrate dev --name add_task_assignee_name
+npx prisma migrate dev --name enable_rls_harden_public_schema
+npx prisma migrate dev --name rename_planned_to_initial_and_add_progress
+```
+
+### 8.5 Database reset & seed
+
+```bash
+npx prisma db seed
+# or
+npm run db:seed
+```
+
+**Behaviour (`src/lib/seed/database-seed.ts`):**
+
+1. Wipe in order: `TaskComment` → `Subtask` → `Task` → `ProjectMember` → `Project`.
+2. Preserve the Super PM user; delete other `User` rows.
+3. Create dummy profiles: Alex Morgan (PM), Sarah Jenkins & David Chen (Members), Rachel Green (Viewer).
+4. Seed projects including **E-Commerce Mobile App Redesign** and **Enterprise Cloud Infrastructure Migration** with realistic tasks, PICs (including custom “Mr X”), checklists, comments, and overdue examples.
+
+**Note:** Seed writes PostgreSQL profiles. Supabase Auth credentials must exist separately for those emails if you need to sign in as dummy users.
+
+Super PM may also invoke `runDatabaseSeedAction` from the application (if exposed in UI).
+
+### 8.6 Quality gates
+
+```bash
+npx tsc --noEmit
+npm run lint
+npm run build
+```
+
+### 8.7 Smoke test checklist (post-deploy / post-seed)
+
+1. Register/sign in → Super PM badge for first user.
+2. Open seeded E-Commerce project → all four tabs.
+3. Kanban: drag cross-column and vertical reorder; Add Task from column header.
+4. Drawer: edit progress/PIC/dates; post comment; verify persistence after refresh.
+5. Move Done → To Do: actual dates cleared; card at top of To Do.
+6. Gantt: Week/Month; sticky panes; Today line without top node; Done node on Actual bar end.
+7. Analytics: no Recharts 0×0 console warnings; KPIs and overdue list populate.
+8. Viewer session: read-only notice; mutations blocked.
+
+### 8.8 Maintenance notes
+
+| Topic | Guidance |
+|-------|----------|
+| Secrets | Rotate Supabase keys if leaked; never commit `.env.local` |
+| Advisories | Prefer `doc/supabase-security.md` before adding PostgREST client queries |
+| Legacy store | Do not rewire production routes to `src/lib/store.ts` |
+| Extending schema | Add Prisma migration; update `types.ts`, mappers, Server Actions, and this spec |
+| Documentation triad | Update `dev_plan.md` for intent, `dev_proc.md` for execution history, `dev_spec.md` for current technical truth |
+
+---
+
+## Appendix A — Status / progress quick reference
+
+| Status | Label | Default progress | Actual dates on enter |
+|--------|-------|------------------|------------------------|
+| `todo` | To Do | 0% | Both cleared |
+| `in_progress` | Doing | 1% (or preserved 1–99) | Start set if null; completion cleared |
+| `done` | Done | 100% | Completion = today; start set if null |
+
+---
+
+## Appendix B — Document control
+
+| Version | Date | Change |
+|---------|------|--------|
+| 1.0 | 9 September 2026 | Initial technical specification after Wave 3 UAT close-out |
+
+---
+
+*End of `dev_spec.md`. This document reflects the implemented Simple Project Task Tracker 2.0 codebase and should be updated whenever schema, Server Actions, RBAC, or primary UX mechanics change.*

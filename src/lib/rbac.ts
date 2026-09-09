@@ -130,6 +130,25 @@ export function canCreateProject(user: SessionUser): boolean {
   return user.globalRole === "super_pm" || user.globalRole === "pm";
 }
 
+/** Super PM, owning PM (project admin), or assigned PIC may delete a task. */
+export function canDeleteTask(
+  user: SessionUser,
+  project: ProjectWithMembers,
+  task: { assigneeId: string | null },
+): boolean {
+  const access = getProjectAccess(user, project);
+  if (access === "admin") return true;
+  if (task.assigneeId === user.id) return true;
+  return false;
+}
+
+export function canManageProject(
+  user: SessionUser,
+  project: ProjectWithMembers,
+): boolean {
+  return getProjectAccess(user, project) === "admin";
+}
+
 export function assertProjectRead(
   user: SessionUser,
   project: ProjectWithMembers,

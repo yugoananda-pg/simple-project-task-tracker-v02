@@ -20,7 +20,11 @@ function toIso(value: Date): string {
 
 function toDateString(value: Date | null): string | null {
   if (!value) return null;
-  return value.toISOString().slice(0, 10);
+  // Prisma `@db.Date` values are calendar days — read UTC parts to avoid WIB shift.
+  const year = value.getUTCFullYear();
+  const month = String(value.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(value.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 export function mapUser(user: PrismaUser): User {
@@ -85,12 +89,15 @@ export function mapTask(
     priority: task.priority,
     bucket: task.bucket,
     assigneeId: task.assigneeId,
-    plannedStartDate: toDateString(task.plannedStartDate),
-    plannedDueDate: toDateString(task.plannedDueDate),
+    assigneeName: task.assigneeName,
+    initialStartDate: toDateString(task.initialStartDate),
+    initialDueDate: toDateString(task.initialDueDate),
     updatedStartDate: toDateString(task.updatedStartDate),
     updatedDueDate: toDateString(task.updatedDueDate),
     actualStartDate: toDateString(task.actualStartDate),
     actualCompletionDate: toDateString(task.actualCompletionDate),
+    progress: task.progress,
+    sortOrder: task.sortOrder,
     createdAt: toIso(task.createdAt),
     updatedAt: toIso(task.updatedAt),
     subtasks: task.subtasks?.map(mapSubtask),

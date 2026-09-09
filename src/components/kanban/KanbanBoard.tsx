@@ -6,6 +6,7 @@ import {
   type DropResult,
 } from "@hello-pangea/dnd";
 import type { Task, TaskStatus } from "@/src/lib/types";
+import { defaultProgressForStatus } from "@/src/lib/task-defaults";
 import KanbanColumn from "./KanbanColumn";
 
 export type KanbanBoardProps = {
@@ -14,14 +15,22 @@ export type KanbanBoardProps = {
     taskId: string,
     newStatus: TaskStatus,
   ) => Promise<boolean> | boolean | void;
+  onReorder?: (input: {
+    taskId: string;
+    sourceStatus: TaskStatus;
+    destinationStatus: TaskStatus;
+    sourceIndex: number;
+    destinationIndex: number;
+  }) => void;
   onTaskClick?: (task: Task) => void;
+  onAddTask?: (status: TaskStatus) => void;
   readOnly?: boolean;
 };
 
 const COLUMNS: ReadonlyArray<{ id: TaskStatus; title: string }> = [
   { id: "todo", title: "To Do" },
   { id: "in_progress", title: "Doing" },
-  { id: "done", title: "Completed" },
+  { id: "done", title: "Done" },
 ];
 
 const VALID_STATUSES = new Set<TaskStatus>(["todo", "in_progress", "done"]);
@@ -34,6 +43,13 @@ function subscribeNever() {
   return () => {};
 }
 
+function sortColumnTasks(tasks: Task[]): Task[] {
+  return [...tasks].sort((a, b) => {
+    if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
+    return a.title.localeCompare(b.title);
+  });
+}
+
 /**
  * Interactive Kanban board (F-201).
  * Client-only gate via useSyncExternalStore avoids SSR/hydration mismatches.
@@ -41,7 +57,9 @@ function subscribeNever() {
 export default function KanbanBoard({
   tasks,
   onStatusChange,
+  onReorder,
   onTaskClick,
+  onAddTask,
   readOnly = false,
 }: KanbanBoardProps) {
   const isReady = useSyncExternalStore(
@@ -61,23 +79,45 @@ export default function KanbanBoard({
       grouped[task.status].push(task);
     }
 
-    return grouped;
+    return {
+      todo: sortColumnTasks(grouped.todo),
+      in_progress: sortColumnTasks(grouped.in_progress),
+      done: sortColumnTasks(grouped.done),
+    };
   }, [tasks]);
 
   async function handleDragEnd(result: DropResult) {
-    if (!onStatusChange || readOnly) return;
+    if (readOnly) return;
 
     const { destination, source, draggableId } = result;
-
     if (!destination) return;
     if (!isTaskStatus(destination.droppableId)) return;
+    if (!isTaskStatus(source.droppableId)) return;
 
-    const newStatus = destination.droppableId;
-    const previousStatus = source.droppableId;
+    const destinationStatus = destination.droppableId;
+    const sourceStatus = source.droppableId;
 
-    if (newStatus === previousStatus) return;
+    if (
+      destinationStatus === sourceStatus &&
+      destination.index === source.index
+    ) {
+      return;
+    }
 
-    await onStatusChange(draggableId, newStatus);
+    if (onReorder) {
+      onReorder({
+        taskId: draggableId,
+        sourceStatus,
+        destinationStatus,
+        sourceIndex: source.index,
+        destinationIndex: destination.index,
+      });
+      return;
+    }
+
+    if (onStatusChange && destinationStatus !== sourceStatus) {
+      await onStatusChange(draggableId, destinationStatus);
+    }
   }
 
   if (!isReady) {
@@ -111,7 +151,13 @@ export default function KanbanBoard({
             title={column.title}
             tasks={tasksByStatus[column.id]}
             onTaskClick={onTaskClick}
-            readOnly={readOnly || !onStatusChange}
+            onAddTask={
+              onAddTask
+                ? () => onAddTask(column.id)
+                : undefined
+            }
+            addTaskHint={`Create in ${column.title} (${defaultProgressForStatus(column.id)}%)`}
+            readOnly={readOnly}
           />
         ))}
       </div>

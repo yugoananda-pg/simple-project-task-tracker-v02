@@ -10,11 +10,23 @@ import {
   type ReactNode,
 } from "react";
 import { X } from "lucide-react";
+import ConfirmDialog from "@/src/components/ui/ConfirmDialog";
+import AssigneePicField from "@/src/components/tasks/AssigneePicField";
+import type { ProjectMemberUser } from "@/src/lib/actions/projects";
+import {
+  createComment,
+  getTaskComments,
+  type TaskCommentWithAuthor,
+} from "@/src/lib/actions/comments";
+import {
+  buildProgressStatusPatch,
+  isFutureLocalDate,
+  toLocalDateString,
+} from "@/src/lib/task-defaults";
 import type {
   Subtask,
   Task,
   TaskBucket,
-  TaskComment,
   TaskPriority,
   TaskStatus,
 } from "@/src/lib/types";
@@ -31,11 +43,11 @@ export type TaskDetailDrawerProps = {
     isCompleted: boolean,
   ) => void;
   onAddSubtask?: (taskId: string, title: string) => void;
-  /** Wave 3 persistence placeholder — wired for UI now. */
-  onPostComment?: (taskId: string, content: string) => void;
-  /** Optional display names for comment authors / PIC. */
-  userNamesById?: Record<string, string>;
   readOnly?: boolean;
+  canDeleteTask?: boolean;
+  onDeleteTask?: (taskId: string) => void;
+  isDeletePending?: boolean;
+  memberUsers?: ProjectMemberUser[];
 };
 
 const PROCESS_GROUP_OPTIONS: ReadonlyArray<{ value: TaskBucket; label: string }> = [
@@ -57,20 +69,20 @@ const PRIORITY_OPTIONS: ReadonlyArray<{ value: TaskPriority; label: string }> =
 const STATUS_OPTIONS: ReadonlyArray<{ value: TaskStatus; label: string }> = [
   { value: "todo", label: "To Do" },
   { value: "in_progress", label: "Doing" },
-  { value: "done", label: "Completed" },
+  { value: "done", label: "Done" },
 ];
 
 type DateFieldKey =
-  | "plannedStartDate"
-  | "plannedDueDate"
+  | "initialStartDate"
+  | "initialDueDate"
   | "updatedStartDate"
   | "updatedDueDate"
   | "actualStartDate"
   | "actualCompletionDate";
 
 const DATE_FIELDS: ReadonlyArray<{ key: DateFieldKey; label: string }> = [
-  { key: "plannedStartDate", label: "Planned start" },
-  { key: "plannedDueDate", label: "Planned due" },
+  { key: "initialStartDate", label: "Initial start" },
+  { key: "initialDueDate", label: "Initial due" },
   { key: "updatedStartDate", label: "Updated start" },
   { key: "updatedDueDate", label: "Updated due" },
   { key: "actualStartDate", label: "Actual start" },
@@ -87,17 +99,37 @@ function formatAuDate(value: string | null | undefined): string {
   return `${day}/${month}/${year}`;
 }
 
-/** Format an ISO datetime for comment timestamps (Australian English). */
+/** Format an ISO datetime as DD/MM/YYYY, HH:mm (Australian English). */
 function formatAuDateTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("en-AU", {
+  const datePart = new Intl.DateTimeFormat("en-AU", {
     day: "2-digit",
     month: "2-digit",
     year: "numeric",
+  }).format(date);
+  const timePart = new Intl.DateTimeFormat("en-AU", {
     hour: "2-digit",
     minute: "2-digit",
+    hour12: false,
   }).format(date);
+  return `${datePart}, ${timePart}`;
+}
+
+function authorInitial(name: string): string {
+  const trimmed = name.trim();
+  return (trimmed[0] ?? "?").toUpperCase();
+}
+
+function AuthorAvatar({ name }: { name: string }) {
+  return (
+    <span
+      aria-hidden
+      className="inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-xs font-semibold text-zinc-700 dark:bg-zinc-700 dark:text-zinc-100"
+    >
+      {authorInitial(name)}
+    </span>
+  );
 }
 
 /** Keep only a calendar YYYY-MM-DD string for native date inputs. */
@@ -171,23 +203,29 @@ function AuDateField({
   value,
   onCommit,
   disabled = false,
+  disallowFuture = false,
 }: {
   id: string;
   label: string;
   value: string | null;
   onCommit: (next: string | null) => void;
   disabled?: boolean;
+  disallowFuture?: boolean;
 }) {
   const externalValue = toDateInputValue(value);
   const [caption, setCaption] = useState(externalValue);
   const [syncedExternal, setSyncedExternal] = useState(externalValue);
+  const [error, setError] = useState<string | null>(null);
   /** Extra remount token when an invalid edit must be discarded. */
   const [epoch, setEpoch] = useState(0);
 
   if (syncedExternal !== externalValue) {
     setSyncedExternal(externalValue);
     setCaption(externalValue);
+    setError(null);
   }
+
+  const today = toLocalDateString();
 
   return (
     <div className="w-full min-w-0 max-w-full">
@@ -200,22 +238,31 @@ function AuDateField({
         type="date"
         lang="en-AU"
         defaultValue={externalValue}
+        max={disallowFuture ? today : undefined}
         disabled={disabled}
         onBlur={(event) => {
           const raw = event.target.value;
           if (raw === "") {
             setCaption("");
+            setError(null);
             onCommit(null);
             return;
           }
-          if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-            setCaption(raw);
-            onCommit(raw);
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+            setCaption(externalValue);
+            setError(null);
+            setEpoch((n) => n + 1);
             return;
           }
-          // Incomplete edit — remount to restore the last saved value.
-          setCaption(externalValue);
-          setEpoch((n) => n + 1);
+          if (disallowFuture && isFutureLocalDate(raw)) {
+            setError("Actual dates cannot be in the future.");
+            setCaption(externalValue);
+            setEpoch((n) => n + 1);
+            return;
+          }
+          setError(null);
+          setCaption(raw);
+          onCommit(raw);
         }}
         className={`${fieldClassName} [color-scheme:light] dark:[color-scheme:dark]`}
       />
@@ -223,6 +270,11 @@ function AuDateField({
         {caption ? formatAuDate(caption) : "—"}{" "}
         <span className="text-zinc-400 dark:text-zinc-500">(DD/MM/YYYY)</span>
       </p>
+      {error ? (
+        <p className="mt-1 text-[11px] font-medium text-red-600 dark:text-red-400">
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -233,35 +285,96 @@ export default function TaskDetailDrawer({
   onTaskChange,
   onToggleSubtask,
   onAddSubtask,
-  onPostComment,
-  userNamesById = {},
   readOnly = false,
+  canDeleteTask = false,
+  onDeleteTask,
+  isDeletePending = false,
+  memberUsers = [],
 }: TaskDetailDrawerProps) {
   const titleId = useId();
   const panelRef = useRef<HTMLElement>(null);
   const [checklistDraft, setChecklistDraft] = useState("");
   const [commentDraft, setCommentDraft] = useState("");
+  const [comments, setComments] = useState<TaskCommentWithAuthor[]>([]);
+  const [commentsTaskId, setCommentsTaskId] = useState<string | null>(null);
+  const [commentsError, setCommentsError] = useState<string | null>(null);
+  const [commentSubmitting, setCommentSubmitting] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [draftTaskId, setDraftTaskId] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
   const [descriptionDraft, setDescriptionDraft] = useState("");
+  const [progressDraft, setProgressDraft] = useState("0");
+  const [syncedProgress, setSyncedProgress] = useState(0);
+  const [isEditingProgress, setIsEditingProgress] = useState(false);
 
   const activeTask = task;
   const isVisible = open && activeTask !== null;
+  const activeCommentsTaskId = isVisible && activeTask ? activeTask.id : null;
+  const commentsLoading =
+    activeCommentsTaskId !== null && commentsTaskId !== activeCommentsTaskId;
 
   if (activeTask && activeTask.id !== draftTaskId) {
     setDraftTaskId(activeTask.id);
     setTitleDraft(activeTask.title);
     setDescriptionDraft(activeTask.description);
+    setProgressDraft(String(activeTask.progress));
+    setSyncedProgress(activeTask.progress);
+    setIsEditingProgress(false);
     setChecklistDraft("");
     setCommentDraft("");
+    setComments([]);
+    setCommentsTaskId(null);
+    setCommentsError(null);
+    setDeleteDialogOpen(false);
   }
   if (!activeTask && draftTaskId !== null) {
     setDraftTaskId(null);
     setTitleDraft("");
     setDescriptionDraft("");
+    setProgressDraft("0");
+    setSyncedProgress(0);
+    setIsEditingProgress(false);
     setChecklistDraft("");
     setCommentDraft("");
+    setComments([]);
+    setCommentsTaskId(null);
+    setCommentsError(null);
+    setDeleteDialogOpen(false);
   }
+
+  if (
+    activeTask &&
+    !isEditingProgress &&
+    syncedProgress !== activeTask.progress
+  ) {
+    setSyncedProgress(activeTask.progress);
+    setProgressDraft(String(activeTask.progress));
+  }
+
+  useEffect(() => {
+    if (!activeCommentsTaskId) return;
+
+    let cancelled = false;
+    const taskId = activeCommentsTaskId;
+
+    getTaskComments(taskId).then((result) => {
+      if (cancelled) return;
+      if (!result.success) {
+        setComments([]);
+        setCommentsError(
+          result.error ?? "Unable to load comments. Please try again.",
+        );
+      } else {
+        setComments(result.data);
+        setCommentsError(null);
+      }
+      setCommentsTaskId(taskId);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeCommentsTaskId]);
 
   useEffect(() => {
     if (!isVisible) return;
@@ -291,23 +404,34 @@ export default function TaskDetailDrawer({
     );
   }, [activeTask?.subtasks]);
 
-  const comments: TaskComment[] = useMemo(() => {
-    const items = activeTask?.comments ?? [];
-    return [...items].sort(
-      (a, b) =>
-        new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-    );
-  }, [activeTask?.comments]);
-
   const completedCount = subtasks.filter((item) => item.isCompleted).length;
   const totalCount = subtasks.length;
   const progressPercent =
     totalCount === 0 ? 0 : Math.round((completedCount / totalCount) * 100);
   const canEdit = !readOnly && Boolean(onTaskChange);
+  const canPostComment = !readOnly;
 
   function patchTask(patch: Partial<Task>) {
     if (!activeTask || !canEdit || !onTaskChange) return;
-    onTaskChange(activeTask.id, patch);
+    const synced =
+      patch.status !== undefined || patch.progress !== undefined
+        ? buildProgressStatusPatch(activeTask, patch)
+        : patch;
+    onTaskChange(activeTask.id, synced);
+  }
+
+  function commitProgressValue(raw: string | number) {
+    if (!activeTask) return;
+    const parsed =
+      typeof raw === "number" ? raw : Number.parseInt(String(raw).trim(), 10);
+    if (Number.isNaN(parsed)) {
+      setProgressDraft(String(activeTask.progress));
+      return;
+    }
+    const progress = Math.max(0, Math.min(100, Math.round(parsed)));
+    setProgressDraft(String(progress));
+    setSyncedProgress(progress);
+    patchTask({ progress });
   }
 
   function handleAddChecklistItem(event: FormEvent) {
@@ -319,17 +443,26 @@ export default function TaskDetailDrawer({
     setChecklistDraft("");
   }
 
-  function handlePostComment(event: FormEvent) {
+  async function handlePostComment(event: FormEvent) {
     event.preventDefault();
-    if (!activeTask) return;
+    if (!activeTask || !canPostComment || commentSubmitting) return;
     const content = commentDraft.trim();
     if (!content) return;
-    onPostComment?.(activeTask.id, content);
-    setCommentDraft("");
-  }
 
-  function resolveUserName(userId: string): string {
-    return userNamesById[userId] ?? `User · ${userId.slice(0, 8)}`;
+    setCommentSubmitting(true);
+    setCommentsError(null);
+
+    const result = await createComment(activeTask.id, content);
+    if (!result.success) {
+      setCommentsError(result.error ?? "Unable to post comment. Please try again.");
+      setCommentSubmitting(false);
+      return;
+    }
+
+    setCommentDraft("");
+    setComments((current) => [...current, result.data]);
+    setCommentsError(null);
+    setCommentSubmitting(false);
   }
 
   return (
@@ -377,6 +510,11 @@ export default function TaskDetailDrawer({
               <div className="min-w-0 flex-1">
                 <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                   Task details
+                  {readOnly ? (
+                    <span className="ml-2 rounded-md bg-zinc-200 px-1.5 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                      Read-only
+                    </span>
+                  ) : null}
                 </p>
                 <h2
                   id={titleId}
@@ -394,6 +532,16 @@ export default function TaskDetailDrawer({
                 <X className="size-4" aria-hidden />
               </button>
             </header>
+
+            {readOnly ? (
+              <div className="border-b border-zinc-200 bg-zinc-50 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900/80 sm:px-5">
+                <p className="text-xs leading-relaxed text-zinc-600 dark:text-zinc-400">
+                  You are viewing this task in read-only mode. Editing fields,
+                  checklist items, and comments is disabled for your role on
+                  this project.
+                </p>
+              </div>
+            ) : null}
 
             <div className="min-w-0 max-w-full flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-4 py-5 sm:px-5">
               {/* Title & description */}
@@ -524,33 +672,93 @@ export default function TaskDetailDrawer({
                   </select>
                 </div>
 
-                <div className="w-full min-w-0 max-w-full">
+                <div className="w-full min-w-0 max-w-full sm:col-span-2">
                   <label
-                    htmlFor={`assignee-${activeTask.id}`}
+                    htmlFor={`progress-${activeTask.id}`}
                     className={labelClassName}
                   >
-                    Assignee (PIC)
+                    Progress
                   </label>
-                  <input
-                    id={`assignee-${activeTask.id}`}
-                    type="text"
-                    defaultValue={activeTask.assigneeId ?? ""}
-                    disabled={!canEdit}
-                    onBlur={(event) => {
-                      const trimmed = event.target.value.trim();
-                      patchTask({
-                        assigneeId: trimmed === "" ? null : trimmed,
-                      });
-                    }}
-                    className={fieldClassName}
-                    placeholder="User ID or leave blank"
-                    autoComplete="off"
-                  />
-                  <p className="mt-1 break-words text-[11px] text-zinc-500 dark:text-zinc-400">
-                    Wave 1 placeholder — enter a user ID until the directory is
-                    available.
+                  <div className="flex items-center gap-3 overflow-visible p-2">
+                    <input
+                      id={`progress-${activeTask.id}`}
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={Number.parseInt(progressDraft, 10) || 0}
+                      disabled={!canEdit}
+                      onPointerDown={() => setIsEditingProgress(true)}
+                      onChange={(event) => {
+                        setIsEditingProgress(true);
+                        setProgressDraft(event.target.value);
+                      }}
+                      onPointerUp={(event) => {
+                        setIsEditingProgress(false);
+                        commitProgressValue(Number(event.currentTarget.value));
+                      }}
+                      onKeyUp={(event) => {
+                        commitProgressValue(Number(event.currentTarget.value));
+                        setIsEditingProgress(false);
+                      }}
+                      className="h-2 w-full min-w-0 cursor-pointer accent-zinc-900 disabled:cursor-not-allowed disabled:opacity-50 dark:accent-zinc-100"
+                    />
+                    <div className="relative w-24 shrink-0">
+                      <input
+                        id={`progress-number-${activeTask.id}`}
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        value={progressDraft}
+                        disabled={!canEdit}
+                        onFocus={() => setIsEditingProgress(true)}
+                        onChange={(event) => {
+                          const next = event.target.value.replace(/[^\d]/g, "");
+                          if (next.length > 3) return;
+                          setProgressDraft(next);
+                        }}
+                        onBlur={() => {
+                          setIsEditingProgress(false);
+                          commitProgressValue(
+                            progressDraft === "" ? 0 : progressDraft,
+                          );
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            (event.target as HTMLInputElement).blur();
+                          }
+                        }}
+                        className={`${fieldClassName} pr-8 text-center tabular-nums`}
+                        aria-label="Progress percent"
+                      />
+                      <span
+                        aria-hidden
+                        className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm font-medium text-zinc-500 dark:text-zinc-400"
+                      >
+                        %
+                      </span>
+                    </div>
+                  </div>
+                  <p className="mt-1 text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
+                    {activeTask.progress}% ·{" "}
+                    {activeTask.status === "todo"
+                      ? "To Do"
+                      : activeTask.status === "in_progress"
+                        ? "Doing"
+                        : "Done"}
                   </p>
                 </div>
+
+                <AssigneePicField
+                  key={`${activeTask.id}-${activeTask.assigneeId ?? ""}-${activeTask.assigneeName}`}
+                  task={activeTask}
+                  members={memberUsers}
+                  disabled={!canEdit}
+                  labelClassName={labelClassName}
+                  fieldClassName={fieldClassName}
+                  onCommit={(patch) => patchTask(patch)}
+                />
               </section>
 
               {/* Multi-date grid */}
@@ -568,6 +776,10 @@ export default function TaskDetailDrawer({
                       label={field.label}
                       value={activeTask[field.key]}
                       disabled={!canEdit}
+                      disallowFuture={
+                        field.key === "actualStartDate" ||
+                        field.key === "actualCompletionDate"
+                      }
                       onCommit={(next) =>
                         patchTask({ [field.key]: next })
                       }
@@ -671,86 +883,139 @@ export default function TaskDetailDrawer({
                 </form>
               </section>
 
-              {/* Comments — Wave 3 UI placeholder */}
+              {/* Comments */}
               <section className={`${sectionClassName} mt-8 pb-2`}>
-                <div className="flex w-full min-w-0 max-w-full items-center justify-between gap-2">
+                <div className="flex w-full min-w-0 max-w-full items-end justify-between gap-3">
                   <h3 className={`${sectionTitleClassName} min-w-0`}>
                     Comments
                   </h3>
-                  <span className="shrink-0 rounded-md bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-900 dark:bg-amber-400/20 dark:text-amber-200">
-                    Wave 3 placeholder
-                  </span>
+                  <p className="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">
+                    {commentsLoading
+                      ? "Loading…"
+                      : comments.length === 1
+                        ? "1 comment"
+                        : `${comments.length} comments`}
+                  </p>
                 </div>
-                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                  Conversation UI is ready now; cloud sync arrives in Wave 3.
-                </p>
+
+                {commentsError ? (
+                  <p className="mt-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-500/40 dark:bg-red-950/40 dark:text-red-200">
+                    {commentsError}
+                  </p>
+                ) : null}
 
                 <ul className="mt-4 w-full min-w-0 max-w-full space-y-3">
-                  {comments.length === 0 ? (
+                  {commentsLoading ? (
                     <li className="rounded-lg border border-dashed border-zinc-300 px-3 py-4 text-center text-xs text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
-                      No comments yet.
+                      Loading comments…
+                    </li>
+                  ) : comments.length === 0 ? (
+                    <li className="rounded-lg border border-dashed border-zinc-300 px-3 py-4 text-center text-xs text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
+                      No comments yet. Be the first to add one below.
                     </li>
                   ) : (
                     comments.map((comment) => (
                       <li
                         key={comment.id}
-                        className="w-full min-w-0 max-w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-3 dark:border-zinc-700 dark:bg-zinc-900/80"
+                        className="flex w-full min-w-0 max-w-full gap-3 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-3 dark:border-zinc-700 dark:bg-zinc-900/80"
                       >
-                        <div className="flex w-full min-w-0 items-baseline justify-between gap-2">
-                          <p className="min-w-0 truncate text-xs font-semibold text-zinc-800 dark:text-zinc-100">
-                            {resolveUserName(comment.userId)}
+                        <AuthorAvatar name={comment.author.name} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex w-full min-w-0 items-baseline justify-between gap-2">
+                            <p className="min-w-0 truncate text-xs font-semibold text-zinc-800 dark:text-zinc-100">
+                              {comment.author.name}
+                            </p>
+                            <time
+                              dateTime={comment.createdAt}
+                              className="shrink-0 text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400"
+                            >
+                              {formatAuDateTime(comment.createdAt)}
+                            </time>
+                          </div>
+                          <p className="mt-1.5 break-words whitespace-pre-wrap text-sm leading-relaxed text-zinc-700 dark:text-zinc-200">
+                            {comment.content}
                           </p>
-                          <time
-                            dateTime={comment.createdAt}
-                            className="shrink-0 text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400"
-                          >
-                            {formatAuDateTime(comment.createdAt)}
-                          </time>
                         </div>
-                        <p className="mt-1.5 break-words whitespace-pre-wrap text-sm leading-relaxed text-zinc-700 dark:text-zinc-200">
-                          {comment.content}
-                        </p>
                       </li>
                     ))
                   )}
                 </ul>
 
-                <form
-                  onSubmit={handlePostComment}
-                  className="mt-3 w-full min-w-0 max-w-full space-y-2"
-                >
-                  <label
-                    htmlFor={`comment-${activeTask.id}`}
-                    className={labelClassName}
+                {canPostComment ? (
+                  <form
+                    onSubmit={handlePostComment}
+                    className="mt-3 w-full min-w-0 max-w-full space-y-2"
                   >
-                    New comment
-                  </label>
-                  <textarea
-                    id={`comment-${activeTask.id}`}
-                    value={commentDraft}
-                    onChange={(event) => setCommentDraft(event.target.value)}
-                    rows={3}
-                    className={`${fieldClassName} resize-y`}
-                    placeholder="Write a comment…"
-                  />
-                  <InstantTooltipButton
-                    type="submit"
-                    disabled={!commentDraft.trim() || !onPostComment}
-                    tooltip={
-                      !onPostComment
-                        ? "Comments are unavailable right now"
-                        : "Please enter comment text first"
-                    }
-                    className={primaryButtonClassName}
-                  >
-                    Post comment
-                  </InstantTooltipButton>
-                </form>
+                    <label
+                      htmlFor={`comment-${activeTask.id}`}
+                      className={labelClassName}
+                    >
+                      New comment
+                    </label>
+                    <textarea
+                      id={`comment-${activeTask.id}`}
+                      value={commentDraft}
+                      onChange={(event) => setCommentDraft(event.target.value)}
+                      rows={3}
+                      disabled={commentSubmitting}
+                      className={`${fieldClassName} resize-y disabled:opacity-60`}
+                      placeholder="Write a comment…"
+                    />
+                    <InstantTooltipButton
+                      type="submit"
+                      disabled={
+                        !commentDraft.trim() || commentSubmitting
+                      }
+                      tooltip="Please enter comment text first"
+                      className={primaryButtonClassName}
+                    >
+                      {commentSubmitting ? "Posting…" : "Post comment"}
+                    </InstantTooltipButton>
+                  </form>
+                ) : (
+                  <p className="mt-3 rounded-lg border border-dashed border-zinc-300 bg-zinc-50 px-3 py-2 text-xs text-zinc-600 dark:border-zinc-600 dark:bg-zinc-900/70 dark:text-zinc-400">
+                    Read-only access — you can view comments but cannot post new
+                    ones on this project.
+                  </p>
+                )}
               </section>
+
+              {canDeleteTask && onDeleteTask && activeTask ? (
+                <section className={`${sectionClassName} mt-8 border-t border-zinc-200 pt-6 dark:border-zinc-800`}>
+                  <h3 className={sectionTitleClassName}>Danger zone</h3>
+                  <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                    Permanently remove this task, including its checklist and
+                    comments.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setDeleteDialogOpen(true)}
+                    disabled={isDeletePending}
+                    className="mt-3 inline-flex w-full items-center justify-center rounded-lg border border-red-300 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-800 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-500/40 dark:bg-red-950/40 dark:text-red-200 dark:hover:bg-red-950/70"
+                  >
+                    Delete task
+                  </button>
+                </section>
+              ) : null}
             </div>
           </div>
         ) : null}
       </aside>
+
+      <ConfirmDialog
+        open={deleteDialogOpen && activeTask !== null}
+        title="Delete task?"
+        message="Are you sure you want to delete this task? This action cannot be undone."
+        confirmLabel="Delete task"
+        isPending={isDeletePending}
+        onCancel={() => {
+          if (!isDeletePending) setDeleteDialogOpen(false);
+        }}
+        onConfirm={() => {
+          if (!activeTask || !onDeleteTask || isDeletePending) return;
+          onDeleteTask(activeTask.id);
+        }}
+      />
     </div>
   );
 }

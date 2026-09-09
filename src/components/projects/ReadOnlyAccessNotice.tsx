@@ -1,0 +1,29 @@
+type ReadOnlyAccessNoticeProps = {
+  compact?: boolean;
+  className?: string;
+};
+
+export default function ReadOnlyAccessNotice({
+  compact = false,
+  className = "",
+}: ReadOnlyAccessNoticeProps) {
+  return (
+    <div
+      role="status"
+      className={[
+        "rounded-lg border border-zinc-300 bg-zinc-50 text-zinc-700 dark:border-zinc-600 dark:bg-zinc-900/80 dark:text-zinc-300",
+        compact ? "px-3 py-2 text-xs" : "px-4 py-3 text-sm",
+        className,
+      ].join(" ")}
+    >
+      <p className="font-semibold text-zinc-900 dark:text-zinc-100">
+        Read-only access
+      </p>
+      <p className={compact ? "mt-1 leading-relaxed" : "mt-1.5 leading-relaxed"}>
+        You can browse tasks, timelines, and analytics, but you cannot edit task
+        details, move Kanban cards, post comments, or create new tasks on this
+        project.
+      </p>
+    </div>
+  );
+}

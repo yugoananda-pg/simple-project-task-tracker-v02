@@ -70,12 +70,17 @@ export interface Task {
   priority: TaskPriority;
   bucket: TaskBucket;
   assigneeId: string | null;
-  plannedStartDate: string | null;
-  plannedDueDate: string | null;
+  assigneeName: string;
+  initialStartDate: string | null;
+  initialDueDate: string | null;
   updatedStartDate: string | null;
   updatedDueDate: string | null;
   actualStartDate: string | null;
   actualCompletionDate: string | null;
+  /** Task completion percentage 0–100. */
+  progress: number;
+  /** Order within a Kanban status column. */
+  sortOrder: number;
   createdAt: string;
   updatedAt: string;
   /** Optional nested checklist when loaded with relations */

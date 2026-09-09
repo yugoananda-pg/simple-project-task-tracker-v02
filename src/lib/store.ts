@@ -88,12 +88,15 @@ function createSeedStore(): AppStore {
       priority: "medium",
       bucket: "initiating",
       assigneeId: ownerId,
-      plannedStartDate: lastWeek.slice(0, 10),
-      plannedDueDate: yesterdayDate,
+      assigneeName: "Demo Owner",
+      initialStartDate: lastWeek.slice(0, 10),
+      initialDueDate: yesterdayDate,
       updatedStartDate: null,
       updatedDueDate: null,
       actualStartDate: lastWeek.slice(0, 10),
       actualCompletionDate: yesterdayDate,
+      progress: 0,
+      sortOrder: 0,
       createdAt: lastWeek,
       updatedAt: yesterday,
       subtasks: [
@@ -131,12 +134,15 @@ function createSeedStore(): AppStore {
       priority: "important",
       bucket: "planning",
       assigneeId: ownerId,
-      plannedStartDate: yesterdayDate,
-      plannedDueDate: inThreeDays,
+      assigneeName: "Demo Owner",
+      initialStartDate: yesterdayDate,
+      initialDueDate: inThreeDays,
       updatedStartDate: null,
       updatedDueDate: null,
       actualStartDate: yesterdayDate,
       actualCompletionDate: null,
+      progress: 0,
+      sortOrder: 0,
       createdAt: yesterday,
       updatedAt: now,
       subtasks: [
@@ -173,12 +179,15 @@ function createSeedStore(): AppStore {
       priority: "urgent",
       bucket: "executing",
       assigneeId: null,
-      plannedStartDate: null,
-      plannedDueDate: overdueDate,
+      assigneeName: "",
+      initialStartDate: null,
+      initialDueDate: overdueDate,
       updatedStartDate: null,
       updatedDueDate: null,
       actualStartDate: null,
       actualCompletionDate: null,
+      progress: 0,
+      sortOrder: 0,
       createdAt: now,
       updatedAt: now,
       subtasks: [],
@@ -193,12 +202,15 @@ function createSeedStore(): AppStore {
       priority: "low",
       bucket: "initiating",
       assigneeId: ownerId,
-      plannedStartDate: null,
-      plannedDueDate: inThreeDays,
+      assigneeName: "Demo Owner",
+      initialStartDate: null,
+      initialDueDate: inThreeDays,
       updatedStartDate: null,
       updatedDueDate: null,
       actualStartDate: null,
       actualCompletionDate: null,
+      progress: 0,
+      sortOrder: 0,
       createdAt: yesterday,
       updatedAt: yesterday,
       subtasks: [],
@@ -293,12 +305,15 @@ function isValidTask(value: unknown): value is Task {
     isTaskPriority(task.priority) &&
     isTaskBucket(task.bucket) &&
     isNullableString(task.assigneeId) &&
-    isNullableString(task.plannedStartDate) &&
-    isNullableString(task.plannedDueDate) &&
+    typeof task.assigneeName === "string" &&
+    isNullableString(task.initialStartDate) &&
+    isNullableString(task.initialDueDate) &&
     isNullableString(task.updatedStartDate) &&
     isNullableString(task.updatedDueDate) &&
     isNullableString(task.actualStartDate) &&
     isNullableString(task.actualCompletionDate) &&
+    typeof task.progress === "number" &&
+    typeof task.sortOrder === "number" &&
     typeof task.createdAt === "string" &&
     typeof task.updatedAt === "string" &&
     subtasksOk &&
@@ -596,12 +611,15 @@ export function createTask(input: {
     priority: "medium",
     bucket: "executing",
     assigneeId: null,
-    plannedStartDate: null,
-    plannedDueDate: null,
+    assigneeName: "",
+    initialStartDate: null,
+    initialDueDate: null,
     updatedStartDate: null,
     updatedDueDate: null,
     actualStartDate: null,
     actualCompletionDate: null,
+    progress: 0,
+    sortOrder: 0,
     createdAt: now,
     updatedAt: now,
     subtasks: [],

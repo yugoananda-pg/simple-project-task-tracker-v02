@@ -98,12 +98,15 @@ model Task {
   priority             TaskPriority @default(medium)
   bucket               TaskBucket   @default(executing)
   assigneeId           String?      @db.Uuid
-  plannedStartDate     DateTime?    @db.Date
-  plannedDueDate       DateTime?    @db.Date
+  assigneeName         String       @default("")
+  initialStartDate     DateTime?    @db.Date
+  initialDueDate       DateTime?    @db.Date
   updatedStartDate     DateTime?    @db.Date
   updatedDueDate       DateTime?    @db.Date
   actualStartDate      DateTime?    @db.Date
   actualCompletionDate DateTime?    @db.Date
+  progress             Int          @default(0)
+  sortOrder            Int          @default(0)
   createdAt            DateTime     @default(now())
   updatedAt            DateTime     @updatedAt
 
@@ -113,7 +116,7 @@ model Task {
   comments TaskComment[]
 
   @@index([projectId])
-  @@index([assigneeId])
+  @@index([projectId, status, sortOrder])
 }
 
 model Subtask {

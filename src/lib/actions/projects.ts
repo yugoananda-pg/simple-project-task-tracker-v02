@@ -23,6 +23,12 @@ import {
 } from "@/src/lib/rbac";
 import type { Project } from "@/src/lib/types";
 
+export type ProjectMemberUser = {
+  id: string;
+  name: string;
+  email: string;
+};
+
 export type ProjectListItem = Project & {
   access: ProjectAccessLevel;
   taskCount: number;
@@ -93,15 +99,24 @@ export async function getProjectById(
     access: ProjectAccessLevel;
     canManage: boolean;
     canWriteTasks: boolean;
+    memberUsers: ProjectMemberUser[];
   }>
 > {
   try {
-    const { user, project, access } = await requireReadableProject(projectId);
+    const { project, access } = await requireReadableProject(projectId);
+    const memberRows = await prisma.projectMember.findMany({
+      where: { projectId },
+      include: {
+        user: { select: { id: true, name: true, email: true } },
+      },
+      orderBy: { user: { name: "asc" } },
+    });
     return actionSuccess({
       project: mapProject(project),
       access,
       canManage: access === "admin",
       canWriteTasks: access === "write" || access === "admin",
+      memberUsers: memberRows.map((row) => row.user),
     });
   } catch (error) {
     return actionFailure(error);
@@ -147,38 +162,6 @@ export async function createProject(input: {
   }
 }
 
-export async function updateProject(input: {
-  projectId: string;
-  name?: string;
-  description?: string;
-}): Promise<ActionResult<Project>> {
-  try {
-    await requireAdminProject(input.projectId);
-
-    const data: { name?: string; description?: string } = {};
-    if (input.name !== undefined) {
-      data.name = validateProjectName(input.name);
-    }
-    if (input.description !== undefined) {
-      data.description = validateProjectDescription(input.description);
-    }
-
-    const project = await prisma.project.update({
-      where: { id: input.projectId },
-      data,
-      include: {
-        members: { select: { userId: true } },
-      },
-    });
-
-    revalidatePath("/");
-    revalidatePath(`/projects/${input.projectId}`);
-    return actionSuccess(mapProject(project));
-  } catch (error) {
-    return actionFailure(error);
-  }
-}
-
 export async function deleteProject(
   projectId: string,
 ): Promise<ActionResult<{ id: string }>> {
@@ -186,6 +169,7 @@ export async function deleteProject(
     await requireAdminProject(projectId);
     await prisma.project.delete({ where: { id: projectId } });
     revalidatePath("/");
+    revalidatePath(`/projects/${projectId}`);
     return actionSuccess({ id: projectId });
   } catch (error) {
     return actionFailure(error);

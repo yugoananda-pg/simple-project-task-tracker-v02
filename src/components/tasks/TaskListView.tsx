@@ -1,5 +1,6 @@
 "use client";
 
+import { getEffectiveDueDate } from "@/src/lib/task-defaults";
 import type { Task, TaskPriority, TaskStatus } from "@/src/lib/types";
 
 export type TaskListViewProps = {
@@ -11,7 +12,7 @@ export type TaskListViewProps = {
 const STATUS_LABELS: Record<TaskStatus, string> = {
   todo: "To Do",
   in_progress: "Doing",
-  done: "Completed",
+  done: "Done",
 };
 
 const STATUS_STYLES: Record<TaskStatus, string> = {
@@ -45,8 +46,9 @@ function todayISODate(): string {
 }
 
 function isOverdue(task: Task): boolean {
-  if (!task.plannedDueDate || task.status === "done") return false;
-  return task.plannedDueDate.slice(0, 10) < todayISODate();
+  const due = getEffectiveDueDate(task);
+  if (!due || task.status === "done") return false;
+  return due.slice(0, 10) < todayISODate();
 }
 
 export default function TaskListView({
@@ -90,8 +92,8 @@ export default function TaskListView({
                   ) : null}
                 </div>
                 <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                  Due {formatAuDate(task.plannedDueDate)} ·{" "}
-                  {PRIORITY_LABELS[task.priority]}
+                  Due {formatAuDate(getEffectiveDueDate(task))} ·{" "}
+                  {PRIORITY_LABELS[task.priority]} · {task.progress}%
                 </p>
               </button>
 

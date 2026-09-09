@@ -2,22 +2,33 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FormEvent, useState, useTransition } from "react";
+import { useState, useTransition } from "react";
 
 import KanbanBoard from "@/src/components/kanban/KanbanBoard";
 import TaskDetailDrawer from "@/src/components/kanban/TaskDetailDrawer";
+import ProjectAnalyticsView from "@/src/components/analytics/ProjectAnalyticsView";
+import ProjectGanttView from "@/src/components/gantt/ProjectGanttView";
+import ReadOnlyAccessNotice from "@/src/components/projects/ReadOnlyAccessNotice";
 import TaskListView from "@/src/components/tasks/TaskListView";
+import ConfirmDialog from "@/src/components/ui/ConfirmDialog";
+import { useToast } from "@/src/components/providers/ToastProvider";
 import type { ActionResult } from "@/src/lib/actions/errors";
+import { deleteProject } from "@/src/lib/actions/projects";
 import {
-  addComment,
   addSubtask,
   createTask,
+  deleteTask,
+  reorderTasks,
   toggleSubtask,
   updateTaskFields,
   updateTaskStatus,
 } from "@/src/lib/actions/tasks";
+import { canDeleteTaskUi } from "@/src/lib/permissions";
+import type { ProjectMemberUser } from "@/src/lib/actions/projects";
 import type { ProjectAccessLevel } from "@/src/lib/rbac";
+import { buildProgressStatusPatch } from "@/src/lib/task-defaults";
 import type { Project, Task, TaskStatus } from "@/src/lib/types";
+import { Loader2 } from "lucide-react";
 
 export type ProjectDetailViewProps = {
   projectId: string;
@@ -25,16 +36,35 @@ export type ProjectDetailViewProps = {
   initialTasks: Task[];
   access: ProjectAccessLevel;
   canWriteTasks: boolean;
-  userNamesById: Record<string, string>;
+  canManageProject: boolean;
+  currentUserId: string | null;
+  memberUsers: ProjectMemberUser[];
   loadError?: string | null;
 };
 
-type ViewMode = "list" | "kanban";
+type ViewMode = "list" | "kanban" | "gantt" | "analytics";
 
 const VIEW_OPTIONS: ReadonlyArray<{ id: ViewMode; label: string }> = [
   { id: "list", label: "List View" },
-  { id: "kanban", label: "Kanban View" },
+  { id: "kanban", label: "Kanban Board" },
+  { id: "gantt", label: "Gantt Chart" },
+  { id: "analytics", label: "Analytics" },
 ];
+
+/** Place a task above every card currently in the destination column. */
+function sortOrderAtTopOfColumn(
+  tasks: Task[],
+  status: TaskStatus,
+  excludeTaskId?: string,
+): number {
+  let min: number | null = null;
+  for (const task of tasks) {
+    if (task.status !== status) continue;
+    if (excludeTaskId && task.id === excludeTaskId) continue;
+    if (min == null || task.sortOrder < min) min = task.sortOrder;
+  }
+  return min == null ? 0 : min - 1;
+}
 
 export default function ProjectDetailView({
   projectId,
@@ -42,19 +72,26 @@ export default function ProjectDetailView({
   initialTasks,
   access,
   canWriteTasks,
-  userNamesById,
+  canManageProject,
+  currentUserId,
+  memberUsers,
   loadError = null,
 }: ProjectDetailViewProps) {
   const router = useRouter();
+  const { showToast } = useToast();
   const [tasks, setTasks] = useState(initialTasks);
   const [syncedInitialTasks, setSyncedInitialTasks] = useState(initialTasks);
   const [viewMode, setViewMode] = useState<ViewMode>("kanban");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [newTaskTitle, setNewTaskTitle] = useState("");
   const [actionError, setActionError] = useState<string | null>(loadError);
-  const [isPending, startTransition] = useTransition();
+  const [deleteProjectDialogOpen, setDeleteProjectDialogOpen] = useState(false);
+  const [isDeletingProject, setIsDeletingProject] = useState(false);
+  const [isDeletingTask, setIsDeletingTask] = useState(false);
+  const [isCreatingTask, startCreateTransition] = useTransition();
 
+  // Only adopt server tasks when the server payload identity changes (navigation /
+  // intentional refresh). Do not stomp optimistic local edits mid-session.
   if (initialTasks !== syncedInitialTasks) {
     setSyncedInitialTasks(initialTasks);
     setTasks(initialTasks);
@@ -66,6 +103,11 @@ export default function ProjectDetailView({
       ? (tasks.find((task) => task.id === selectedTaskId) ?? null)
       : null;
   const isReadOnly = access === "read";
+  const canDeleteSelectedTask = canDeleteTaskUi(
+    canManageProject,
+    currentUserId,
+    selectedTask,
+  );
 
   function syncTask(updated: Task) {
     setTasks((current) => {
@@ -79,19 +121,46 @@ export default function ProjectDetailView({
     });
   }
 
+  /** Silent optimistic mutation — no route refresh, no board overlay. */
   function runTaskMutation(
     action: () => Promise<ActionResult<Task>>,
+    optimisticPatch?: { taskId: string; patch: Partial<Task> },
   ) {
-    startTransition(async () => {
-      const result = await action();
+    const snapshot = tasks;
+    if (optimisticPatch) {
+      setTasks((current) =>
+        current.map((task) =>
+          task.id === optimisticPatch.taskId
+            ? { ...task, ...optimisticPatch.patch }
+            : task,
+        ),
+      );
+    }
+
+    void action().then((result) => {
       if (!result.success) {
+        if (optimisticPatch) setTasks(snapshot);
         setActionError(result.error ?? "Something went wrong. Please try again.");
         return;
       }
       syncTask(result.data);
       setActionError(null);
-      router.refresh();
     });
+  }
+
+  function applyLocalStatusChange(
+    task: Task,
+    newStatus: TaskStatus,
+    options?: { pinToTop?: boolean; allTasks?: Task[] },
+  ): Task {
+    const patched = buildProgressStatusPatch(task, { status: newStatus });
+    const sortOrder =
+      options?.pinToTop &&
+      options.allTasks &&
+      newStatus !== task.status
+        ? sortOrderAtTopOfColumn(options.allTasks, newStatus, task.id)
+        : task.sortOrder;
+    return { ...task, ...patched, sortOrder };
   }
 
   function handleStatusChange(taskId: string, newStatus: TaskStatus): Promise<boolean> {
@@ -100,7 +169,12 @@ export default function ProjectDetailView({
     const snapshot = tasks;
     setTasks((current) =>
       current.map((task) =>
-        task.id === taskId ? { ...task, status: newStatus } : task,
+        task.id === taskId
+          ? applyLocalStatusChange(task, newStatus, {
+              pinToTop: true,
+              allTasks: current,
+            })
+          : task,
       ),
     );
     setActionError(null);
@@ -114,14 +188,116 @@ export default function ProjectDetailView({
         return false;
       }
       syncTask(result.data);
-      router.refresh();
       return true;
+    });
+  }
+
+  function handleReorder(input: {
+    taskId: string;
+    sourceStatus: TaskStatus;
+    destinationStatus: TaskStatus;
+    sourceIndex: number;
+    destinationIndex: number;
+  }) {
+    if (!canWriteTasks) return;
+
+    const snapshot = tasks;
+    const nextTasks = [...tasks];
+    const columnTasks = nextTasks
+      .filter((task) => task.status === input.sourceStatus)
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+    const [moved] = columnTasks.splice(input.sourceIndex, 1);
+    if (!moved) return;
+
+    if (input.sourceStatus === input.destinationStatus) {
+      columnTasks.splice(input.destinationIndex, 0, moved);
+      const reordered = columnTasks.map((task, index) => ({
+        ...task,
+        sortOrder: index,
+      }));
+      const others = nextTasks.filter((task) => task.status !== input.sourceStatus);
+      setTasks([...others, ...reordered]);
+      setActionError(null);
+
+      void reorderTasks({
+        projectId,
+        status: input.destinationStatus,
+        orderedTaskIds: reordered.map((task) => task.id),
+      }).then((result) => {
+        if (!result.success) {
+          setTasks(snapshot);
+          setActionError(result.error ?? "Unable to reorder tasks.");
+        }
+      });
+      return;
+    }
+
+    const destColumn = nextTasks
+      .filter((task) => task.status === input.destinationStatus)
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+    // DnD keeps the drop index — do not force top-of-column.
+    const movedTask = applyLocalStatusChange(moved, input.destinationStatus);
+    destColumn.splice(input.destinationIndex, 0, movedTask);
+
+    const sourceReordered = columnTasks.map((task, index) => ({
+      ...task,
+      sortOrder: index,
+    }));
+    const destReordered = destColumn.map((task, index) => ({
+      ...task,
+      sortOrder: index,
+    }));
+    const others = nextTasks.filter(
+      (task) =>
+        task.status !== input.sourceStatus &&
+        task.status !== input.destinationStatus,
+    );
+    setTasks([...others, ...sourceReordered, ...destReordered]);
+    setActionError(null);
+
+    void Promise.all([
+      reorderTasks({
+        projectId,
+        status: input.sourceStatus,
+        orderedTaskIds: sourceReordered.map((task) => task.id),
+      }),
+      reorderTasks({
+        projectId,
+        status: input.destinationStatus,
+        orderedTaskIds: destReordered.map((task) => task.id),
+      }),
+    ]).then(([sourceResult, destResult]) => {
+      if (!sourceResult.success || !destResult.success) {
+        setTasks(snapshot);
+        const message = !sourceResult.success
+          ? sourceResult.error
+          : !destResult.success
+            ? destResult.error
+            : null;
+        setActionError(message ?? "Unable to move and reorder tasks.");
+      }
     });
   }
 
   function handleTaskChange(taskId: string, patch: Partial<Task>) {
     if (!canWriteTasks) return;
-    runTaskMutation(() => updateTaskFields(taskId, patch));
+    const current = tasks.find((task) => task.id === taskId);
+    if (!current) return;
+
+    const synced = buildProgressStatusPatch(current, patch);
+    const nextStatus = synced.status ?? current.status;
+    const statusChanged = nextStatus !== current.status;
+    const optimistic: Partial<Task> = statusChanged
+      ? {
+          ...synced,
+          sortOrder: sortOrderAtTopOfColumn(tasks, nextStatus, taskId),
+        }
+      : synced;
+
+    runTaskMutation(() => updateTaskFields(taskId, optimistic), {
+      taskId,
+      patch: optimistic,
+    });
   }
 
   function handleToggleSubtask(
@@ -138,9 +314,68 @@ export default function ProjectDetailView({
     runTaskMutation(() => addSubtask(taskId, title));
   }
 
-  function handlePostComment(taskId: string, content: string) {
+  async function handleAddTaskInColumn(status: TaskStatus) {
     if (!canWriteTasks) return;
-    runTaskMutation(() => addComment(taskId, content));
+
+    startCreateTransition(async () => {
+      const result = await createTask({
+        projectId,
+        title: "New task",
+        status,
+      });
+      if (!result.success) {
+        setActionError(result.error ?? "Unable to create task.");
+        return;
+      }
+      syncTask(result.data);
+      setSelectedTaskId(result.data.id);
+      setDrawerOpen(true);
+      setActionError(null);
+    });
+  }
+
+  async function handleDeleteTask(taskId: string) {
+    if (
+      !canDeleteTaskUi(canManageProject, currentUserId, selectedTask) ||
+      isDeletingTask
+    ) {
+      return;
+    }
+
+    setIsDeletingTask(true);
+    setActionError(null);
+
+    const result = await deleteTask(taskId);
+    if (!result.success) {
+      setIsDeletingTask(false);
+      setActionError(result.error ?? "Unable to delete this task.");
+      showToast(result.error ?? "Unable to delete this task.", "error");
+      return;
+    }
+
+    setTasks((current) => current.filter((task) => task.id !== taskId));
+    setIsDeletingTask(false);
+    closeDrawer();
+    showToast("Task deleted successfully.");
+  }
+
+  async function handleDeleteProject() {
+    if (!canManageProject || isDeletingProject) return;
+
+    setIsDeletingProject(true);
+    setActionError(null);
+
+    const result = await deleteProject(projectId);
+    if (!result.success) {
+      setIsDeletingProject(false);
+      setActionError(result.error ?? "Unable to delete this project.");
+      showToast(result.error ?? "Unable to delete this project.", "error");
+      return;
+    }
+
+    showToast("Project deleted successfully.");
+    router.push("/");
+    router.refresh();
   }
 
   function openTask(task: Task) {
@@ -153,26 +388,6 @@ export default function ProjectDetailView({
     window.setTimeout(() => {
       setSelectedTaskId(null);
     }, 300);
-  }
-
-  function handleAddTask(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!canWriteTasks) return;
-
-    const title = newTaskTitle.trim();
-    if (!title) return;
-
-    startTransition(async () => {
-      const result = await createTask({ projectId, title });
-      if (!result.success) {
-        setActionError(result.error ?? "Unable to create task.");
-        return;
-      }
-      syncTask(result.data);
-      setNewTaskTitle("");
-      setActionError(null);
-      router.refresh();
-    });
   }
 
   if (!project) {
@@ -205,8 +420,8 @@ export default function ProjectDetailView({
         ← Back to projects
       </Link>
 
-      <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
+      <div className="mt-4 flex items-start justify-between gap-8">
+        <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="break-words text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
               {project.name}
@@ -218,7 +433,7 @@ export default function ProjectDetailView({
             ) : null}
           </div>
           {project.description ? (
-            <p className="mt-2 max-w-2xl break-words text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+            <p className="mt-2 max-w-4xl text-sm leading-relaxed text-zinc-400 md:text-base">
               {project.description}
             </p>
           ) : (
@@ -226,38 +441,15 @@ export default function ProjectDetailView({
           )}
         </div>
 
-        {canWriteTasks ? (
-          <form
-            onSubmit={handleAddTask}
-            className="flex w-full flex-col gap-2 sm:w-auto sm:min-w-[20rem] sm:flex-row"
+        {canManageProject ? (
+          <button
+            type="button"
+            onClick={() => setDeleteProjectDialogOpen(true)}
+            disabled={isDeletingProject}
+            className="inline-flex shrink-0 items-center justify-center rounded-lg border border-red-300 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-800 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-500/40 dark:bg-red-950/40 dark:text-red-200 dark:hover:bg-red-950/70"
           >
-            <input
-              type="text"
-              value={newTaskTitle}
-              onChange={(event) => setNewTaskTitle(event.target.value)}
-              placeholder="New task title"
-              disabled={isPending}
-              className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-400/40 disabled:opacity-60 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-50"
-              aria-label="New task title"
-            />
-            <span className="group relative inline-flex">
-              <button
-                type="submit"
-                disabled={!newTaskTitle.trim() || isPending}
-                className="inline-flex items-center justify-center rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-white"
-              >
-                Add task
-              </button>
-              {!newTaskTitle.trim() ? (
-                <span
-                  role="tooltip"
-                  className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5 w-max max-w-[16rem] -translate-x-1/2 rounded-md bg-zinc-900 px-2.5 py-1.5 text-center text-[11px] font-medium leading-snug text-white opacity-0 invisible shadow-lg transition-none duration-0 group-hover:visible group-hover:opacity-100 dark:bg-zinc-100 dark:text-zinc-950"
-                >
-                  Please enter a task title first
-                </span>
-              ) : null}
-            </span>
-          </form>
+            Delete project
+          </button>
         ) : null}
       </div>
 
@@ -306,22 +498,73 @@ export default function ProjectDetailView({
           </div>
         ) : null}
 
+        {isReadOnly ? <ReadOnlyAccessNotice /> : null}
+
         <div className="relative min-h-[28rem]">
-          <div key={viewMode} className="sptt-view-fade">
-            {viewMode === "kanban" ? (
-              <KanbanBoard
-                tasks={tasks}
-                onStatusChange={canWriteTasks ? handleStatusChange : undefined}
-                onTaskClick={openTask}
-                readOnly={!canWriteTasks}
-              />
-            ) : (
-              <TaskListView
-                tasks={tasks}
-                onTaskClick={openTask}
-                onStatusChange={canWriteTasks ? handleStatusChange : undefined}
-              />
-            )}
+          {isCreatingTask ? (
+            <div
+              className="absolute inset-0 z-20 flex items-center justify-center rounded-xl bg-white/55 backdrop-blur-[1px] dark:bg-zinc-950/50"
+              aria-busy="true"
+              aria-live="polite"
+            >
+              <div className="flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+                <Loader2 className="size-4 animate-spin" aria-hidden />
+                Creating task…
+              </div>
+            </div>
+          ) : null}
+
+          <div
+            role="tabpanel"
+            aria-hidden={viewMode !== "kanban"}
+            className={viewMode === "kanban" ? "block" : "hidden"}
+          >
+            <KanbanBoard
+              tasks={tasks}
+              onStatusChange={canWriteTasks ? handleStatusChange : undefined}
+              onReorder={canWriteTasks ? handleReorder : undefined}
+              onTaskClick={openTask}
+              onAddTask={canWriteTasks ? handleAddTaskInColumn : undefined}
+              readOnly={!canWriteTasks}
+            />
+          </div>
+
+          <div
+            role="tabpanel"
+            aria-hidden={viewMode !== "list"}
+            className={viewMode === "list" ? "block" : "hidden"}
+          >
+            <TaskListView
+              tasks={tasks}
+              onTaskClick={openTask}
+              onStatusChange={canWriteTasks ? handleStatusChange : undefined}
+            />
+          </div>
+
+          <div
+            role="tabpanel"
+            aria-hidden={viewMode !== "gantt"}
+            className={viewMode === "gantt" ? "block" : "hidden"}
+          >
+            <ProjectGanttView
+              tasks={tasks}
+              projectName={project.name}
+              onTaskClick={openTask}
+              readOnly={isReadOnly}
+            />
+          </div>
+
+          <div
+            role="tabpanel"
+            aria-hidden={viewMode !== "analytics"}
+            className={viewMode === "analytics" ? "block" : "hidden"}
+          >
+            <ProjectAnalyticsView
+              tasks={tasks}
+              onTaskClick={openTask}
+              readOnly={isReadOnly}
+              chartsVisible={viewMode === "analytics"}
+            />
           </div>
         </div>
       </div>
@@ -333,9 +576,23 @@ export default function ProjectDetailView({
         onTaskChange={canWriteTasks ? handleTaskChange : undefined}
         onToggleSubtask={canWriteTasks ? handleToggleSubtask : undefined}
         onAddSubtask={canWriteTasks ? handleAddSubtask : undefined}
-        onPostComment={canWriteTasks ? handlePostComment : undefined}
-        userNamesById={userNamesById}
         readOnly={!canWriteTasks}
+        canDeleteTask={canDeleteSelectedTask}
+        onDeleteTask={canDeleteSelectedTask ? handleDeleteTask : undefined}
+        isDeletePending={isDeletingTask}
+        memberUsers={memberUsers}
+      />
+
+      <ConfirmDialog
+        open={deleteProjectDialogOpen}
+        title="Delete project?"
+        message="Are you sure you want to delete this project? All associated tasks, checklists, and comments will be permanently removed."
+        confirmLabel="Delete project"
+        isPending={isDeletingProject}
+        onCancel={() => {
+          if (!isDeletingProject) setDeleteProjectDialogOpen(false);
+        }}
+        onConfirm={handleDeleteProject}
       />
     </section>
   );
